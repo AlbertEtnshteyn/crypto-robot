@@ -23,7 +23,7 @@ DEFAULTS = {"threshold": 2.0, "entry": "15:00", "capital": 10_000,
             "bybit_demo_key": "", "bybit_demo_secret": "", "bybit_real_key": "", "bybit_real_secret": "",
             "binance_demo_key": "", "binance_demo_secret": "", "binance_real_key": "", "binance_real_secret": "",
             # «Движение дня»: время — по Москве (день начинается в 03:00 МСК = 00:00 UTC); суммы — в USDT
-            "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5}
+            "mid_allday": True, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5}
 SECRET_KEYS = [k for k in DEFAULTS if k.endswith("_key") or k.endswith("_secret")]
 
 CHART_DEPTH = {1: 2, 5: 10, 15: 30, 60: 90, 1440: 400}       # сколько дней истории грузить на график
@@ -111,7 +111,9 @@ def mid_cfg(s):
     tfs = [int(x) for x in (s.get("mid_tfs") or [s.get("mid_tf", 60) or 60]) if int(x) in (5, 15, 60, 1440)] or [60]
     u = lambda v, d: (hhmm(v, d) - sc.SHIFT) % 1440        # время из настроек — по Москве, робот считает в UTC
     return {"thr": float(s.get("mid_thr", 2.5) or 2.5) / 100,
-            "from": u(s.get("mid_from", "04:00"), 240), "to": u(s.get("mid_to", "02:00"), 120) or 1440,
+            "from": 0 if s.get("mid_allday", True) else u(s.get("mid_from", "04:00"), 240),
+            "to": 1440 if s.get("mid_allday", True) else (u(s.get("mid_to", "02:00"), 120) or 1440),
+            "allday": bool(s.get("mid_allday", True)),
             "exit": u(s.get("mid_exit", "02:50"), 170), "tfs": sorted(set(tfs), reverse=True),
             "idx": False, "share": float(s.get("mid_share", 10) or 10) / 100,
             "ref": 0, "multi": bool(s.get("mid_multi", True)),
@@ -730,6 +732,30 @@ def bt_run(data, m, imoex=None):
     return trades
 
 
+def bt_leverage(trades, setting):
+    """Плечо каждой сделки на истории — как у робота: из настроек или максимальное плечо монеты на бирже («auto»),
+    но не больше, чем позволяет стоп (ход до стопа — не больше половины хода до ликвидации)."""
+    v = str(setting or "1")
+    if v == "1":
+        return
+    mx = {}
+    for t in trades:
+        tk = t["ticker"]
+        if tk not in mx:
+            try:
+                mx[tk] = max(1.0, sc.EX().max_leverage(tk))
+            except Exception:
+                mx[tk] = 1.0 if v == "auto" else None
+        try:
+            lev = mx[tk] if v == "auto" else (min(float(v), mx[tk]) if mx[tk] else float(v))
+        except ValueError:
+            lev = 1.0
+        dist = abs(t["entry"] / t["stop"] - 1) if t.get("stop") else 0
+        if dist > 0:
+            lev = min(lev, max(1.0, int(0.5 / dist)))
+        t["lev"] = lev
+
+
 def bt_summary(trades, share, capital=1_000_000):
     """Итоги проверки. Каждая сделка — доля share от счёта на начало дня входа (как у робота), счёт растёт со сделками."""
     if not trades:
@@ -746,7 +772,7 @@ def bt_summary(trades, share, capital=1_000_000):
         start = eq
         mo = months.setdefault(d[:7], {"m": d[:7], "n": 0, "sum": 0.0, "start": start, "rub": 0.0})
         for t in by_day[d]:
-            stake = start * share
+            stake = start * share * t.get("lev", 1)
             if t.get("cap"):
                 stake = min(stake, t["cap"])                       # не больше доли дневного оборота бумаги
             t["stake"] = round(stake)
@@ -904,7 +930,8 @@ class Backtest:
                     t["time_msk"] = sc.msk(tt).strftime("%d.%m %H:%M")
                 except Exception:
                     pass
-            sm = bt_summary(trades, m["share"] * max(1.0, float(s.get("leverage", 1) or 1) if str(s.get("leverage", "1")) != "auto" else 1.0), capital)
+            bt_leverage(trades, s.get("leverage", "1"))
+            sm = bt_summary(trades, m["share"], capital)
             tfn = {5: "5м", 15: "15м", 60: "1ч", 1440: "1д"}
             self.state["result"] = {
                 "summary": sm, "trades": trades[-400:], "tickers": done_n, "fails": fails, "currency": "USDT",

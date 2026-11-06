@@ -471,6 +471,7 @@ class CryptoBroker:
         self.acc = f"{ex}-{mode}"
         self.real = mode == "real"
         self.lev = leverage
+        self.want_lev = {}                      # плечо следующей заявки по монете (ставит робот перед входом)
         self.name = self.x.title
 
     def prepare(self):
@@ -532,12 +533,18 @@ class CryptoBroker:
         by_val = (ins.get("min_notional") or 5) / (px * lot) if px else 0
         return max(1, int(by_qty + 0.999999), int(by_val + 0.999999))
 
+    def max_lev(self, tk):
+        try:
+            return max(1.0, self.x.max_leverage(tk))
+        except Exception:
+            return 1.0
+
     def order(self, tk, lots, side, close=False):
         qty = lots * self.x.share(tk)["lot"]
         if not close:
             try:
-                lv = float(self.lev) if str(self.lev) not in ("", "auto") else 1.0
-                self.x.set_leverage(tk, max(1.0, lv))
+                lv = (getattr(self, "want_lev", {}) or {}).pop(tk, None) or 1.0
+                self.x.set_leverage(tk, max(1.0, lv))     # плечо на бирже = плечо этой позиции (меньше залог не нужен)
             except Exception as e:
                 self.log(f"  {tk}: плечо не установлено ({e}) — заявка с текущим плечом биржи")
         return self.x.order(tk, qty, side, reduce=close)
@@ -788,8 +795,8 @@ class AutoTrader:
         m = self._mid()
         self.log(f"Робот запущен ({'ТОРГОВЛЯ' if self.trade else 'НАБЛЮДЕНИЕ'}). Стратегия одна — «Движение дня»: "
                  f"монета выросла на {m['thr'] * 100:g}% от начала дня (03:00 МСК) → покупка, как только цена дошла до середины между EMA10 и EMA20 "
-                 f"({', '.join(self._tf_name(x) for x in m['tfs'])}); стоп за лоем дня, тейк на хае дня. Покупки {hm(m['from'])}–{hm(m['to'])}, выход {hm(m['exit'])}"
-                  + f", на сделку {m['share'] * 100:g}% счёта" + (f" × плечо {self.sp.get('leverage')}" if str(self.sp.get('leverage', '1')) not in ("1", "") else "") + ". "
+                 f"({', '.join(self._tf_name(x) for x in m['tfs'])}); стоп за лоем дня, тейк на хае дня. " + ("Покупки круглосуточно" if m.get("allday") else f"Покупки {hm(m['from'])}–{hm(m['to'])}") + f", выход {hm(m['exit'])}"
+                  + f", на сделку {m['share'] * 100:g}% счёта" + ((" × максимальное плечо монеты на бирже" if str(self.sp.get('leverage')) == "auto" else f" × плечо {self.sp.get('leverage')}") if str(self.sp.get('leverage', '1')) not in ("1", "") else "") + ". "
                  + "Режим: " + rc_modes_text(m["modes"]) + ".")
         if self.positions:
             self.log(f"Открытые позиции с прошлого запуска: {', '.join(p['ticker'] for p in self.positions)} — продолжаю сопровождать.")
@@ -1014,8 +1021,10 @@ class AutoTrader:
                 base = self.b.portfolio_value() or self.capital
             except Exception:
                 pass
-            lev = self._lev_x()
+            lev, lev_why = self._lev_for(tk, abs(px - stop) / px)
             alloc = base * m["share"] * lev
+            if lev_why:
+                self.log(f"«Движение дня»: {tk} — {lev_why}")
             try:
                 liq = self._liq(tk, now)
             except Exception:
@@ -1427,10 +1436,11 @@ class AutoTrader:
                 base = self.b.portfolio_value() or self.capital
             except Exception:
                 pass
-        lev, lev_txt = self._leverage(tk, s)
+        lev, lev_why = self._lev_for(tk, abs(sig["entry"] / level - 1) if sig.get("entry") and level else 0)
+        lev_txt = f" × плечо {lev:g}" if lev != 1 else ""
         alloc = base * sp["share"] * lev
         self.log(f"  размер позиции: {sp['share'] * 100:g}% от {'портфеля' if base != self.capital else 'капитала'} "
-                 f"{base:,.0f} ₽{lev_txt} = {alloc:,.0f} ₽".replace(",", " "))
+                 f"{base:,.0f} USDT{lev_txt} = {alloc:,.0f} USDT".replace(",", " "))
         self._open(tk, side=s, alloc=alloc, strat="spike", stop_level=level, t1=sig["t1"],
                    exit_min=prof["exit"], carry=prof["carry"], tf=sig.get("tf"))
 
@@ -1805,15 +1815,37 @@ class AutoTrader:
             self.log(f"Итог дня по «{hm(sc.ENTRY_MIN)}»: сделок {len(res)}, в среднем {sum(res) / len(res) * 100:+.2f}% на сделку "
                      f"(до комиссий), в плюсе {sum(1 for r in res if r > 0)}.")
 
-    def _lev_x(self):
-        """Плечо из настроек (по умолчанию ×1): размер позиции = % счёта × плечо."""
+    def _lev_x(self, tk=None):
+        """Плечо из настроек: число (×1 по умолчанию) или «auto» — максимальное плечо монеты на бирже.
+        Фиксированное плечо тоже не больше разрешённого биржей для монеты."""
+        v = str(self.sp.get("leverage", "1") or "1")
+        mx = None
+        if tk and hasattr(self.b, "max_lev"):
+            mx = self.b.max_lev(tk)
+        if v == "auto":
+            return mx or 1.0
         try:
-            return max(1.0, float(self.sp.get("leverage", 1) or 1))
+            x = max(1.0, float(v))
         except (TypeError, ValueError):
-            return 1.0
+            x = 1.0
+        return min(x, mx) if mx else x
+
+    def _lev_for(self, tk, stop_dist):
+        """Плечо позиции: из настроек / биржи, но так, чтобы стоп сработал задолго до ликвидации:
+        ход цены до стопа — не больше половины хода до ликвидации (≈ 1/плечо)."""
+        lev = self._lev_x(tk)
+        why = ""
+        if lev > 1 and stop_dist > 0:
+            safe = max(1.0, int(0.5 / stop_dist))
+            if lev > safe:
+                why = f"плечо снижено с ×{lev:g} до ×{safe:g}: стоп в {stop_dist * 100:.1f}% от цены должен сработать раньше ликвидации"
+                lev = safe
+        if hasattr(self.b, "want_lev"):
+            self.b.want_lev[tk] = lev
+        return lev, why
 
     def _leverage(self, tk, side):
-        x = self._lev_x()
+        x = self._lev_x(tk)
         return x, (f" × плечо {x:g}" if x != 1 else "")
 
     def set_trade(self, on):
@@ -1971,7 +2003,8 @@ class AutoTrader:
         elif r.get("by_form"):
             self.log(f"  {tk}: уровней дня нет — стоп и тейк в % из окна")
         exit_min = utc_min(r.get("exit_at") or "", self._mid()["exit"])
-        self.log(f"Открываю вручную: {tk} {'лонг' if s > 0 else 'шорт'}, {share * 100:g}% счёта" + (f" × плечо {self._lev_x():g}" if self._lev_x() != 1 else "") + f", стоп {stop * 100:g}%"
+        lev_m, lev_why = self._lev_for(tk, stop)
+        self.log(f"Открываю вручную: {tk} {'лонг' if s > 0 else 'шорт'}, {share * 100:g}% счёта" + (f" × плечо {lev_m:g}" if lev_m != 1 else "") + (f" ({lev_why})" if lev_why else "") + f", стоп {stop * 100:g}%"
                  + (f", тейк {r['take'] * 100:g}%" if r.get("take") else "") + (f", трейлинг {r['trail'] * 100:g}%" if r.get("trail") else "")
                  + f", во время выхода {hm(exit_min)} МСК — " + ("перенести" if r.get("carry") else "закрыть"))
         n0 = len(self.positions)
@@ -1980,7 +2013,7 @@ class AutoTrader:
             base = self.b.portfolio_value() or self.capital
         except Exception:
             pass
-        self._open(tk, s, base * share * self._lev_x(), strat="manual", stop_level=px * (1 - s * stop), exit_min=exit_min, tf=r.get("tf"))
+        self._open(tk, s, base * share * lev_m, strat="manual", stop_level=px * (1 - s * stop), exit_min=exit_min, tf=r.get("tf"))
         if len(self.positions) > n0:
             p = self.positions[-1]
             p["carry_pick"] = "carry" if r.get("carry") else "close"

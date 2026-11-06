@@ -357,8 +357,24 @@ class Exchange:
                     out[p["symbol"]] = q
         return out
 
+    def max_leverage(self, sym):
+        """Максимальное плечо монеты на бирже (маржинальные условия). Bybit — из списка контрактов (открытые данные);
+        Binance — из таблицы плеч счёта (/fapi/v1/leverageBracket, нужен ключ), без ключа — ×20."""
+        if self.ex == "bybit":
+            return float(self.share(sym).get("max_lev") or 10)
+        br = getattr(self, "_brackets", None)
+        if (br is None or time.time() - getattr(self, "_brackets_t", 0) > 6 * 3600) and self.key and self.secret:
+            try:
+                js = self._priv("GET", "/fapi/v1/leverageBracket", {})
+                br = {x["symbol"]: max(b_.get("initialLeverage", 1) for b_ in x.get("brackets", [{}]))
+                      for x in (js if isinstance(js, list) else [js])}
+                self._brackets, self._brackets_t = br, time.time()
+            except Exception:
+                br = br or {}
+        return float((br or {}).get(sym) or 20)
+
     def set_leverage(self, sym, lev):
-        lev = max(1, min(int(round(float(lev))), int(self.share(sym).get("max_lev") or 20)))
+        lev = max(1, min(int(-(-float(lev) // 1)), int(self.max_leverage(sym))))
         if self._lev.get(sym) == lev:
             return lev
         try:

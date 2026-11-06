@@ -210,7 +210,7 @@ function renderState(st) {
   const pairTxt = pr && pr.enabled ? ` Пара серверов: торгует ${pr.active ? "этот" : "второй"} сервер (${pr.active ? "" : pr.peer_host + ", "}этот — ${pr.role === "primary" ? "основной" : "резервный"}); второй ${pr.peer_ok ? "на связи" : "не отвечает с " + pr.peer_last_ok}.` : "";
   const MS = SET || {};
   const tfs = (MS.mid_tfs || [MS.mid_tf || 60]).map((x) => ({ 5: "5м", 15: "15м", 60: "1ч", 1440: "1д" })[x] || x).join(", ");
-  $("#robotHint").textContent = (st.trade ? `«Движение дня» (${(MS.mid_modes || ["long"]).map((k) => ({ idx_long: "BTC вверх — лонг", idx_short: "BTC вниз — шорт", both: "обе стороны", long: "только лонг", short: "только шорт" })[k]).join(", ")}): монета выросла на ${MS.mid_thr || 2.5}% от 03:00 МСК → покупка на середине EMA10/EMA20 (${tfs}), стоп за лоем дня, тейк на хае дня; покупки ${MS.mid_from || "04:00"}–${MS.mid_to || "02:00"}, выход ${MS.mid_exit || "02:50"} МСК. «Стоп» — выключить новые сделки.`
+  $("#robotHint").textContent = (st.trade ? `«Движение дня» (${(MS.mid_modes || ["long"]).map((k) => ({ idx_long: "BTC вверх — лонг", idx_short: "BTC вниз — шорт", both: "обе стороны", long: "только лонг", short: "только шорт" })[k]).join(", ")}): монета выросла на ${MS.mid_thr || 2.5}% от 03:00 МСК → покупка на середине EMA10/EMA20 (${tfs}), стоп за лоем дня, тейк на хае дня; ${MS.mid_allday === false ? `покупки ${MS.mid_from || "04:00"}–${MS.mid_to || "02:00"}` : "покупки круглосуточно"}, выход ${MS.mid_exit || "02:50"} МСК. «Стоп» — выключить новые сделки.`
     : st.token_set ? "Робот следит за рынком, но не покупает. «Старт» — включить торговлю."
       : "Введите ключи API биржи во вкладке «Настройки» → «Биржа и счёт».") + pairTxt +
     (st.exchange ? " Счёт: " + st.exchange + (/_real$/.test(st.broker || "") ? " — РЕАЛЬНЫЕ деньги." : ".") : "");
@@ -686,7 +686,7 @@ $("#fillBtn").onclick = async () => {
 };
 
 // ---------------------------------------------------------------- настройки
-const LEV = { "1": "×1 (без плеча)", "2": "×2", "3": "×3", "5": "×5", "10": "×10" };
+const LEV = { "1": "×1 (без плеча)", "auto": "плечо биржи по монете (максимальное)", "2": "×2", "3": "×3", "5": "×5", "10": "×10", "20": "×20" };
 let SET = null;
 async function loadSettings() {
   try { SET = await api("/api/settings"); renderSettings(SET); } catch (e) { if (e.message !== "401") toast("Ошибка: " + e.message); }
@@ -730,6 +730,7 @@ function renderSettings(s) {
     <div class="f"><span>Чем торговать</span>
       ${(s.markets_all || []).map(([k, t]) => `<label class="c"><input type="checkbox" name="dmk_${k}" ${(s.day_markets || ["top20"]).includes(k) ? "checked" : ""}><span>${esc(t)}</span></label>`).join("")}</div>
     <div class="hint" style="margin-left:0">Время — по Москве. Торговый день: с 03:00 МСК до 03:00 МСК следующего дня.</div>
+    ${chk("mid_allday", "Покупки круглосуточно", "Иначе — только в окне ниже. Вошли после времени выхода — выход на следующий день.")}
     ${inp("mid_from", "Покупки с (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="04:00"')}
     ${inp("mid_to", "Покупки до (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="02:00"')}
     ${inp("mid_exit", "Выход в (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="02:50"')}
@@ -791,7 +792,7 @@ $("#setForm").addEventListener("submit", async (e) => {
     mid_thr: parseFloat(String(v("mid_thr")).replace(",", ".")) || 2.5, mid_tfs: [5, 15, 60, 1440].filter((k) => c("mtf_" + k)),
     mid_from: (v("mid_from") || "04:00").trim(), mid_to: (v("mid_to") || "02:00").trim(), mid_exit: (v("mid_exit") || "02:50").trim(),
     mid_share: parseFloat(String(v("mid_share")).replace(",", ".")) || 10,
-    mid_liq: parseFloat(v("mid_liq")) || 1, mid_min_turn: parseFloat(v("mid_min_turn")) || 20, mid_liq_on: c("mid_liq_on"), mid_minv_on: c("mid_minv_on"), mid_vol_on: c("mid_vol_on"), mid_vol: parseFloat(v("mid_vol")) || 5, mid_multi: c("mid_multi"), mid_carry: v("mid_carry") || "none", mid_modes: ["idx_long", "idx_short", "both", "long", "short"].filter((k) => c("mm_" + k)), mid_carry_days: parseInt(v("mid_carry_days")) || 0,
+    mid_liq: parseFloat(v("mid_liq")) || 1, mid_min_turn: parseFloat(v("mid_min_turn")) || 20, mid_liq_on: c("mid_liq_on"), mid_allday: c("mid_allday"), mid_minv_on: c("mid_minv_on"), mid_vol_on: c("mid_vol_on"), mid_vol: parseFloat(v("mid_vol")) || 5, mid_multi: c("mid_multi"), mid_carry: v("mid_carry") || "none", mid_modes: ["idx_long", "idx_short", "both", "long", "short"].filter((k) => c("mm_" + k)), mid_carry_days: parseInt(v("mid_carry_days")) || 0,
     tg_chat: (v("tg_chat") || "").trim(), tg_form: c("tg_form"), tg_trend: c("tg_trend"), tg_trades: c("tg_trades"), tg_imp: c("tg_imp"),
   };
   if (!out.mid_tfs.length) out.mid_tfs = [60];
