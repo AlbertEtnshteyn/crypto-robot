@@ -167,6 +167,7 @@ class Robot:
         d["tg_token_set"] = bool(tgt)
         d["brokers"] = list(at.BROKER_NAMES.items())
         d["markets_all"] = at.MARKETS
+        d["mid_modes_all"] = rc.MID_MODES
         d["token_set"] = self.has_token()
         return d
 
