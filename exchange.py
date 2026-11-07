@@ -460,6 +460,7 @@ class Exchange:
                 self._brackets, self._brackets_t = br, time.time()
             except Exception:
                 br = br or {}
+                self._brackets, self._brackets_t = br, time.time() - 6 * 3600 + 600   # не получилось — повтор через 10 мин
         return float((br or {}).get(sym) or 20)
 
     def set_leverage(self, sym, lev):
@@ -498,6 +499,7 @@ class Exchange:
                 self.fee_src = "тариф счёта"
             except Exception:
                 self.fee_src = "базовый тариф биржи (тариф счёта не получен)"
+                self._fees[sym] = (tk, mk, time.time() - 6 * 3600 + 600)    # повтор запроса тарифа — через 10 минут
         else:
             self.fee_src = "базовый тариф биржи (ключ не введён)"
         return tk, mk
