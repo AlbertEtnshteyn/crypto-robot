@@ -13,6 +13,7 @@
 """
 import hashlib
 import hmac
+import secrets
 import json
 import threading
 import time
@@ -41,6 +42,44 @@ TF_BINANCE = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 1440: "1d"}
 
 _session = threading.local()
 
+# Общий на процесс «светофор» по лимитам биржи (лимиты считаются на IP, а клиентов у робота несколько):
+# Binance — вес запросов за минуту (2400), заголовок X-MBX-USED-WEIGHT-1M; Bybit — 600 запросов за 5 с.
+# При 418/429 биржа просит паузу — тогда все запросы к ней ждут, чтобы не получить бан IP.
+_GATE = {"binance": {"pause_until": 0.0, "used": 0, "used_t": 0.0}, "bybit": {"pause_until": 0.0, "used": 0, "used_t": 0.0}}
+_GATE_LOCK = threading.Lock()
+BINANCE_SOFT_WEIGHT = 1800          # выше этого веса за минуту — притормаживаем до следующей минуты
+
+
+def _gate_wait(ex):
+    g = _GATE[ex]
+    while True:
+        with _GATE_LOCK:
+            now = time.time()
+            wait = g["pause_until"] - now
+            if wait <= 0 and ex == "binance" and g["used"] >= BINANCE_SOFT_WEIGHT and int(g["used_t"] // 60) == int(now // 60):
+                wait = 60 - now % 60 + 0.5          # вес минуты почти исчерпан — ждём новую минуту
+        if wait <= 0:
+            return
+        time.sleep(min(wait, 5))
+
+
+def _gate_note(ex, r):
+    g = _GATE[ex]
+    with _GATE_LOCK:
+        if ex == "binance":
+            w = r.headers.get("X-MBX-USED-WEIGHT-1M") or r.headers.get("x-mbx-used-weight-1m")
+            if w:
+                try:
+                    g["used"], g["used_t"] = int(w), time.time()
+                except ValueError:
+                    pass
+        if r.status_code in (418, 429):
+            try:
+                ra = float(r.headers.get("Retry-After") or 0)
+            except ValueError:
+                ra = 0
+            g["pause_until"] = max(g["pause_until"], time.time() + max(ra, 10 if r.status_code == 429 else 60))
+
 
 def http():
     s = getattr(_session, "s", None)
@@ -54,11 +93,32 @@ class ExchangeError(RuntimeError):
     pass
 
 
+class ExchangeUnknown(ExchangeError):
+    """Запрос на изменение (заявка) ушёл, но ответа нет: исполнена ли — надо проверить по номеру заявки."""
+
+
 def _f(x, default=0.0):
     try:
         return float(x)
     except (TypeError, ValueError):
         return default
+
+
+HINTS = {
+    10001: "", -4061: " — включите на бирже режим позиций «односторонний» (One-Way), робот работает только в нём",
+    10003: " — ключ API неверный или для другого счёта (демо/реальный)", 10004: " — неверный secret ключа API",
+    10005: " — у ключа нет прав на торговлю контрактами", 10010: " — IP сервера не разрешён в настройках ключа",
+    110007: " — не хватает свободных USDT на счёте", -2019: " — не хватает свободных USDT (маржи) на счёте",
+    -2014: " — ключ API неверный", -2015: " — ключ API неверный, нет прав или IP сервера не разрешён",
+    110017: " — позиции уже нет на бирже", -2022: " — позиции уже нет на бирже",
+}
+
+
+def _hint(code):
+    try:
+        return HINTS.get(int(code), "")
+    except (TypeError, ValueError):
+        return ""
 
 
 def _ms(dt):
@@ -92,6 +152,8 @@ class Exchange:
         self._ins_t = 0
         self._tick = {}           # symbol -> тикер за 24 часа
         self._tick_t = 0
+        self._px, self._px_t = {}, 0  # Binance: последние цены всех монет
+        self._stops = {}              # Binance: symbol -> номер страховочной стоп-заявки
         self._dt = 0              # поправка часов для подписи, мс
         self._lev = {}            # symbol -> установленное плечо
         self._lock = threading.Lock()
@@ -105,12 +167,17 @@ class Exchange:
         last = None
         for i, base in enumerate(self.pub_hosts):
             for attempt in range(3):
+                _gate_wait(self.ex)
                 try:
-                    r = http().get(base + path, params=params or {}, timeout=20)
+                    r = http().get(base + path, params=params or {}, timeout=(5, 15))
                 except requests.RequestException as e:
                     last = ExchangeError(f"нет связи с {NAMES[self.ex]} ({base}): {e}")
                     break
-                if r.status_code in (418, 429) or r.status_code >= 500:
+                _gate_note(self.ex, r)
+                if r.status_code in (418, 429):
+                    last = ExchangeError(f"{NAMES[self.ex]}: слишком много запросов (HTTP {r.status_code}) — пауза по требованию биржи")
+                    continue                                   # _gate_wait выдержит паузу, которую попросила биржа
+                if r.status_code >= 500:
                     last = ExchangeError(f"{NAMES[self.ex]}: HTTP {r.status_code}")
                     time.sleep(1 + attempt * 2)
                     continue
@@ -130,10 +197,10 @@ class Exchange:
             raise ExchangeError(f"{NAMES[self.ex]}: HTTP {r.status_code} {r.text[:200]}")
         if self.ex == "bybit":
             if js.get("retCode", 0) != 0:
-                raise ExchangeError(f"Bybit: {js.get('retMsg')} (код {js.get('retCode')})")
+                raise ExchangeError(f"Bybit: {js.get('retMsg')} (код {js.get('retCode')})" + _hint(js.get("retCode")))
             return js.get("result", {})
         if isinstance(js, dict) and "code" in js and js.get("code", 0) not in (0, 200) and "msg" in js:
-            raise ExchangeError(f"Binance: {js.get('msg')} (код {js.get('code')})")
+            raise ExchangeError(f"Binance: {js.get('msg')} (код {js.get('code')})" + _hint(js.get("code")))
         if r.status_code >= 400:
             raise ExchangeError(f"Binance: HTTP {r.status_code} {r.text[:200]}")
         return js
@@ -159,6 +226,7 @@ class Exchange:
             if not self._dt:
                 self._sync_time(base)
             for attempt in range(2):
+                _gate_wait(self.ex)
                 ts = str(int(time.time() * 1000) + self._dt)
                 try:
                     if self.ex == "bybit":
@@ -181,11 +249,17 @@ class Exchange:
                         h = {"X-MBX-APIKEY": self.key}
                         r = http().request(method, base + path + "?" + q + "&signature=" + sig, headers=h, timeout=20)
                 except requests.RequestException as e:
+                    if method != "GET":                  # заявка могла дойти — не повторяем вслепую, решает вызывающий
+                        raise ExchangeUnknown(f"нет ответа от {self.title} ({base}): {e}")
                     last = ExchangeError(f"нет связи с {self.title} ({base}): {e}")
                     break
-                if r.status_code == 429 or r.status_code >= 500:
+                _gate_note(self.ex, r)
+                if r.status_code in (418, 429) or r.status_code >= 500:
+                    if method != "GET" and r.status_code >= 500:
+                        raise ExchangeUnknown(f"{self.title}: HTTP {r.status_code} — неизвестно, исполнена ли заявка")
                     last = ExchangeError(f"{self.title}: HTTP {r.status_code}")
-                    time.sleep(2)
+                    if r.status_code >= 500:
+                        time.sleep(2)
                     continue
                 try:
                     js = self._check(r)
@@ -283,8 +357,17 @@ class Exchange:
         return syms[:n] if n else syms
 
     def last_prices(self, syms):
-        tk = self.tickers(max_age=3)
-        return {s: tk[s]["last"] for s in syms if s in tk and tk[s]["last"]}
+        """Последние цены. Bybit — тикеры (один запрос на все монеты); Binance — /ticker/price (вес 2 вместо 40)."""
+        if self.ex == "bybit":
+            tk = self.tickers(max_age=2)
+            return {s: tk[s]["last"] for s in syms if s in tk and tk[s]["last"]}
+        with self._lock:
+            if not self._px or time.time() - self._px_t >= 1.5:
+                js = self._get_pub("/fapi/v1/ticker/price")
+                px = {x.get("symbol"): _f(x.get("price")) for x in (js if isinstance(js, list) else [js])}
+                if px:
+                    self._px, self._px_t = px, time.time()
+        return {s: self._px[s] for s in syms if self._px.get(s)}
 
     # ------------------------------------------------------------------ свечи
     def candles(self, sym, frm, to, tf=5):
@@ -297,13 +380,14 @@ class Exchange:
         lim = 1000 if self.ex == "bybit" else 1500
         while a < b:
             end = min(b, a + span * lim - 1)
+            n = min(lim, (end - a) // span + 2)          # ровно столько свечей, сколько нужно: у Binance вес запроса растёт с limit
             if self.ex == "bybit":
                 js = self._get_pub("/v5/market/kline", {"category": "linear", "symbol": sym, "interval": TF_BYBIT[tf],
-                                                        "start": a, "end": end, "limit": lim})
+                                                        "start": a, "end": end, "limit": n})
                 rows = [(int(x[0]), x[1], x[2], x[3], x[4], x[5], x[6]) for x in js.get("list", [])]
             else:
                 js = self._get_pub("/fapi/v1/klines", {"symbol": sym, "interval": TF_BINANCE[tf], "startTime": a,
-                                                       "endTime": end, "limit": lim})
+                                                       "endTime": end, "limit": n})
                 rows = [(int(x[0]), x[1], x[2], x[3], x[4], x[5], x[7]) for x in js]
             for t, o, h, l, c, v, q in rows:
                 if a <= t <= end:
@@ -391,43 +475,92 @@ class Exchange:
 
     def order(self, sym, qty, side, reduce=False):
         """Рыночная заявка: side > 0 — купить, < 0 — продать. reduce=True — только уменьшение позиции (закрытие).
-        Возвращает среднюю цену исполнения (или None)."""
+        У каждой заявки свой номер (clientId): если ответ потерялся, робот спрашивает биржу по этому номеру,
+        а не отправляет заявку второй раз. Возвращает среднюю цену исполнения (или None)."""
         ins = self.share(sym)
         qs = fmt_qty(qty, ins["lot"])
         if float(qs) <= 0:
             raise ExchangeError(f"{sym}: количество {qty} меньше шага {ins['lot']}")
+        cid = f"cr{int(time.time() * 1000)}{secrets.token_hex(3)}"
         if self.ex == "bybit":
-            js = self._priv("POST", "/v5/order/create", {"category": "linear", "symbol": sym,
-                                                         "side": "Buy" if side > 0 else "Sell", "orderType": "Market",
-                                                         "qty": qs, "reduceOnly": bool(reduce), "positionIdx": 0})
-            oid = js.get("orderId")
-            for _ in range(8):
-                time.sleep(0.4)
+            try:
+                self._priv("POST", "/v5/order/create", {"category": "linear", "symbol": sym,
+                                                        "side": "Buy" if side > 0 else "Sell", "orderType": "Market",
+                                                        "qty": qs, "reduceOnly": bool(reduce), "positionIdx": 0,
+                                                        "orderLinkId": cid})
+            except ExchangeUnknown:
+                pass                                    # ответ потерялся — узнаем по номеру ниже
+            for k in range(12):
+                time.sleep(0.3 if k < 6 else 1.0)
                 try:
-                    r = self._priv("GET", "/v5/order/realtime", {"category": "linear", "symbol": sym, "orderId": oid})
-                    lst = r.get("list") or []
-                    if not lst:
-                        r = self._priv("GET", "/v5/order/history", {"category": "linear", "symbol": sym, "orderId": oid})
-                        lst = r.get("list") or []
-                    if lst:
-                        o = lst[0]
-                        if o.get("orderStatus") in ("Rejected", "Cancelled") and not _f(o.get("cumExecQty")):
-                            raise ExchangeError(f"Bybit отклонил заявку: {o.get('rejectReason') or o.get('orderStatus')}")
-                        px = _f(o.get("avgPrice"))
-                        if px:
-                            return px
-                except ExchangeError as e:
-                    if "отклонил" in str(e):
-                        raise
-            return None
+                    o = None
+                    for path in ("/v5/order/realtime", "/v5/order/history"):
+                        lst = (self._priv("GET", path, {"category": "linear", "symbol": sym, "orderLinkId": cid}).get("list") or [])
+                        if lst:
+                            o = lst[0]
+                            break
+                except ExchangeError:
+                    continue
+                if not o:
+                    continue
+                if o.get("orderStatus") in ("Rejected", "Cancelled", "Deactivated") and not _f(o.get("cumExecQty")):
+                    raise ExchangeError(f"Bybit отклонил заявку: {o.get('rejectReason') or o.get('orderStatus')}")
+                px = _f(o.get("avgPrice"))
+                if px and o.get("orderStatus") in ("Filled", "PartiallyFilledCanceled"):
+                    return px
+            raise ExchangeError("Bybit: заявка не найдена — похоже, не дошла до биржи")
         p = {"symbol": sym, "side": "BUY" if side > 0 else "SELL", "type": "MARKET", "quantity": qs,
-             "newOrderRespType": "RESULT"}
+             "newOrderRespType": "RESULT", "newClientOrderId": cid}
         if reduce:
             p["reduceOnly"] = "true"
-        js = self._priv("POST", "/fapi/v1/order", p)
+        try:
+            js = self._priv("POST", "/fapi/v1/order", p)
+        except ExchangeUnknown:
+            js = None
+            for _ in range(6):
+                time.sleep(1.0)
+                try:
+                    js = self._priv("GET", "/fapi/v1/order", {"symbol": sym, "origClientOrderId": cid})
+                    break
+                except ExchangeError as e:
+                    if "-2013" in str(e):               # такой заявки нет — до биржи не дошла
+                        raise ExchangeError("Binance: заявка не дошла до биржи")
+            if js is None:
+                raise ExchangeError("Binance: нет ответа — состояние заявки неизвестно, проверю позицию")
         if js.get("status") in ("REJECTED", "EXPIRED") and not _f(js.get("executedQty")):
             raise ExchangeError(f"Binance отклонил заявку: {js.get('status')}")
         return _f(js.get("avgPrice")) or None
+
+    def set_stop(self, sym, side, qty, stop):
+        """Страховочный стоп на бирже на всю позицию (срабатывает, даже если робот или сервер недоступен).
+        Bybit — стоп-лосс позиции (/v5/position/trading-stop); Binance — STOP_MARKET closePosition (старый отменяется).
+        side — сторона ПОЗИЦИИ (+1 лонг, −1 шорт). stop=None — снять стоп."""
+        tick = self.share(sym).get("tick") or 0
+        def rnd(x):
+            if not tick:
+                return f"{x:.8g}"
+            d = (Decimal(str(x)) / Decimal(str(tick))).to_integral_value(ROUND_DOWN if side > 0 else "ROUND_UP") * Decimal(str(tick))
+            return format(d.normalize(), "f")
+        if self.ex == "bybit":
+            try:
+                self._priv("POST", "/v5/position/trading-stop", {"category": "linear", "symbol": sym, "positionIdx": 0,
+                                                                 "tpslMode": "Full", "stopLoss": rnd(stop) if stop else "0",
+                                                                 "slTriggerBy": "LastPrice"})
+            except ExchangeError as e:
+                if "34040" not in str(e):           # «не изменилось» — не ошибка
+                    raise
+            return
+        old = self._stops.pop(sym, None)
+        if old:
+            try:
+                self._priv("DELETE", "/fapi/v1/order", {"symbol": sym, "orderId": old})
+            except ExchangeError:
+                pass
+        if stop:
+            js = self._priv("POST", "/fapi/v1/order", {"symbol": sym, "side": "SELL" if side > 0 else "BUY", "type": "STOP_MARKET",
+                                                       "stopPrice": rnd(stop), "closePosition": "true", "workingType": "CONTRACT_PRICE",
+                                                       "newClientOrderId": f"crs{int(time.time() * 1000)}{secrets.token_hex(2)}"})
+            self._stops[sym] = js.get("orderId")
 
     # ------------------------------------------------------------------ проверка связи
     def check(self):
@@ -448,6 +581,16 @@ class Exchange:
                 b = self.balance_info()
                 eq, fr = (f"{b['equity']:,.2f}".replace(",", " "), f"{b['free']:,.2f}".replace(",", " "))
                 out.append(f"✔ {self.title}: ключ подходит, на счёте {eq} USDT, свободно {fr}")
+                if self.ex == "binance":
+                    try:
+                        if self._priv("GET", "/fapi/v1/positionSide/dual").get("dualSidePosition"):
+                            out.append(f"✘ {self.title}: включён режим хеджирования — переключите на «односторонний» (One-Way), иначе заявки не пройдут")
+                    except ExchangeError:
+                        pass
+                t1 = time.time()
+                self._priv("GET", "/v5/account/wallet-balance" if self.ex == "bybit" else "/fapi/v2/balance",
+                           {"accountType": "UNIFIED"} if self.ex == "bybit" else {})
+                out.append(f"  скорость ответа счёта: {int((time.time() - t1) * 1000)} мс")
             except Exception as e:
                 out.append(f"✘ {self.title}: ключ не подошёл или нет прав на торговлю фьючерсами — {e}")
         else:

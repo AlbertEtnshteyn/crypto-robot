@@ -460,6 +460,30 @@ def utc_min(hhmm_msk, default):
         return default
 
 
+_POOL = None
+
+
+def _parallel(items, fn, workers=8):
+    """fn(item) для всех items в несколько потоков; результат — item -> значение или исключение.
+    Потоки постоянные: у каждого своё соединение с биржей, оно не открывается заново на каждый запрос."""
+    global _POOL
+    from concurrent.futures import ThreadPoolExecutor
+    out = {}
+    if not items:
+        return out
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="fetch")
+
+    def one(x):
+        try:
+            return x, fn(x)
+        except Exception as e:                     # noqa: BLE001 — ошибка конкретной монеты не валит остальные
+            return x, e
+    for k, v in _POOL.map(one, items):
+        out[k] = v
+    return out
+
+
 class CryptoBroker:
     """Счёт на криптобирже: Bybit или Binance, демо или реальный, USDT-фьючерсы. Данные и заявки — с биржи."""
 
@@ -539,6 +563,13 @@ class CryptoBroker:
             return max(1.0, self.x.max_leverage(tk))
         except Exception:
             return 1.0
+
+    def positions(self):
+        """Позиции на бирже: монета -> количество (минус — шорт)."""
+        return self.x.positions()
+
+    def set_stop(self, tk, side, lots, stop):
+        self.x.set_stop(tk, side, lots * self.x.share(tk)["lot"], stop)
 
     def order(self, tk, lots, side, close=False):
         qty = lots * self.x.share(tk)["lot"]
@@ -859,6 +890,7 @@ class AutoTrader:
         t = now.hour * 60 + now.minute
         secs = t * 60 + now.second
         self._balance(now)
+        self._reconcile(now)
         # 1) сопровождение позиций: выход по времени, стоп, тейк
         if self.positions:
             today = now.date().isoformat()
@@ -989,6 +1021,8 @@ class AutoTrader:
             return
         self.prices.update(lp)
         self.mid_view = getattr(self, "mid_view", {})
+        # свечи для EMA — по всем монетам сразу, в несколько потоков (каждая монета — в своём потоке)
+        _parallel([tk for tk in watch if lp.get(tk)], lambda tk: [self._mid_levels(tk, now, tf) for tf in m["tfs"]])
         for tk in watch:
             px = lp.get(tk)
             if not px:
@@ -1126,6 +1160,7 @@ class AutoTrader:
         """Раз в минуту: цена каждой монеты в начале дня (00:00 UTC) и движение от неё сейчас."""
         day = now.date()
         start = datetime(day.year, day.month, day.day, tzinfo=sc.MSK)
+        todo = []
         for tk in self._scan_list():
             if tk in self.opens:
                 continue
@@ -1133,17 +1168,21 @@ class AutoTrader:
             if last_try and (now - last_try).total_seconds() < 300:
                 continue
             self.open_tries[tk] = now
-            try:
-                rows = self.b.candles(tk, day, start, min(now, start + timedelta(minutes=30)), 5)
-            except sc.CertError:
-                raise
-            except Exception as e:
-                self.log(f"  {tk}: свечи не получены ({e})")
+            todo.append(tk)
+        got = _parallel(todo, lambda tk: self.b.candles(tk, day, start, min(now, start + timedelta(minutes=30)), 5))
+        errs = []
+        for tk in todo:
+            rows = got.get(tk)
+            if isinstance(rows, Exception):
+                errs.append(f"{tk} ({rows})")
                 continue
             if rows and rows[0]["t"] <= start.replace(tzinfo=None) + timedelta(minutes=5):
                 self.opens[tk] = rows[0]["o"]
             elif (now - start).total_seconds() > 1800:
                 self.opens[tk] = None         # монеты не было в начале дня (новый листинг) — пропускаем, как в проверке
+        if errs:
+            self.log(f"  свечи начала дня не получены: {', '.join(errs[:5])}" + (f" и ещё {len(errs) - 5}" if len(errs) > 5 else "")
+                     + " — повторю через 5 минут")
         ref = {tk: o for tk, o in self.opens.items() if o}
         live = list(ref)
         if not live:
@@ -1633,8 +1672,10 @@ class AutoTrader:
         if now_t.hour * 60 + now_t.minute >= pos["exit_min"]:
             pos["carry_date"] = now_t.date().isoformat()     # вошли после времени выхода — выход завтра
             pos["overnight"] = True
+        pos["opened_t"] = self.clock().timestamp()
         self.positions.append(pos)
         self._save()
+        self._sync_ex_stops()
         if strat == "mid":
             lo_n, hi_n = ("лой", "хай") if side > 0 else ("хай", "лой")
             self.log(f"  {tk}: {'КУПЛЕНО' if side > 0 else 'ПРОДАНО (шорт)'} {lots * per_lot:g} монет (" + f"{lots * per_lot * entry:,.2f}".replace(",", " ")
@@ -1716,8 +1757,89 @@ class AutoTrader:
                     p["stage"] = 2
                     self._save()
                     self.log(f"  {p['ticker']}: тейк2 взят, остаток {p['lots']} лот. ведёт трейлинг-стоп")
+        self._sync_ex_stops()
         if not live or changed:
             self._push()
+
+    # ------------------------------------------------------------------ страховка на бирже и сверка позиций
+    def _sync_ex_stops(self):
+        """Страховочный стоп на бирже = стоп робота. Обновляется, когда робот двигает стоп (безубыток, трейлинг),
+        не чаще раза в 10 с на позицию. Срабатывает, даже если сервер или связь пропали."""
+        if not self.sp.get("ex_stop", True) or not hasattr(self.b, "set_stop") or not self.trade and not self.positions:
+            return
+        now = self.clock().timestamp()
+        for p in list(self.positions):
+            st, old = p.get("stop"), p.get("ex_stop")
+            if not st or (old and abs(st / old - 1) < 0.0005) or now - p.get("ex_stop_t", 0) < 10:
+                continue
+            p["ex_stop_t"] = now
+            try:
+                self.b.set_stop(p["ticker"], p["side"], p["lots"], st)
+                p["ex_stop"] = st
+                self._save()
+            except Exception as e:
+                if not p.get("ex_stop_err"):
+                    self.log(f"  {p['ticker']}: страховочный стоп на бирже не поставлен ({e}) — стоп ведёт робот")
+                p["ex_stop_err"] = str(e)
+
+    def _reconcile(self, now, force=False):
+        """Раз в минуту сверка с биржей: позиция робота, которой на бирже уже нет (сработал стоп на бирже, закрыта
+        вручную, ликвидация), убирается из робота с записью в журнал; если на бирже меньше — количество поправляется."""
+        if not hasattr(self.b, "positions") or not (self.positions or force):
+            return
+        if not force and now.timestamp() - getattr(self, "_rec_t", 0) < 60:
+            return
+        self._rec_t = now.timestamp()
+        try:
+            ex = self.b.positions()
+        except Exception as e:
+            return self.log(f"Сверка позиций с биржей не удалась: {e}") if force else None
+        with self.pos_lock:
+            for p in list(self.positions):
+                if now.timestamp() - p.get("opened_t", 0) < 20:
+                    continue                                 # только что открыта — биржа может не успеть показать
+                per = p.get("per_lot") or 1
+                q = ex.get(p["ticker"], 0.0) * p["side"]      # сколько монет в сторону позиции робота
+                have = int(round(q / per)) if q > 0 else 0
+                if have <= 0:
+                    lp = self.prices.get(p["ticker"]) or p["entry"]
+                    try:
+                        lp = self.b.last_prices([p["ticker"]]).get(p["ticker"]) or lp
+                    except Exception:
+                        pass
+                    why = "закрыта на бирже (стоп на бирже, вручную или ликвидация)"
+                    if p.get("ex_stop") and (lp - p["ex_stop"]) * p["side"] <= abs(p["ex_stop"]) * 0.003:
+                        why = "стоп на бирже"
+                    self._forget(p, p.get("ex_stop") if why == "стоп на бирже" else lp, why)
+                elif have < p["lots"]:
+                    self.log(f"  {p['ticker']}: на бирже {have * per:.8g} вместо {p['lots'] * per:.8g} — поправил количество")
+                    p["lots"] = have
+                    self._save()
+        mine = {p["ticker"] for p in self.positions}
+        alien = sorted(set(ex) - mine)
+        if alien and alien != getattr(self, "_alien", None):
+            self.log("На бирже есть позиции, которые робот не открывал (не трогаю): " + ", ".join(alien))
+        self._alien = alien
+
+    def _forget(self, p, px, why):
+        """Позиция уже закрыта на бирже — убрать у робота и записать в журнал (по последней цене, без заявки)."""
+        if p not in self.positions:
+            return
+        res = p["side"] * (px / p["entry"] - 1)
+        lots = p["lots"]
+        self.positions.remove(p)
+        self.st["results"].append([p.get("strat", "15"), res])
+        self._save()
+        pnl = p["side"] * (px - p["entry"]) * lots * (p.get("per_lot") or 1)
+        self.log(f"  {p['ticker']}: {why} — у робота закрыта по ~{px:.6g}, результат {res * 100:+.2f}%, " + f"{pnl:+,.2f}".replace(",", " ") + " USDT")
+        sc.append_rows(sc.MANUAL_LOG if p.get("strat") == "manual" else sc.SANDBOX_LOG, LOG_COLS,
+                       [{"date": self.st.get("date") or self.clock().date().isoformat(), "ticker": p["ticker"],
+                         "side": "лонг" if p["side"] > 0 else "шорт", "lots": round(lots * (p.get("per_lot") or 1), 8),
+                         "entry": round(p["entry"], 6), "exit": round(px, 6), "reason": why, "result_pct": round(res * 100, 4),
+                         "time": sc.msk(self.clock()).strftime("%Y-%m-%d %H:%M"), "pnl_rub": round(pnl, 2),
+                         "entry_time": f"{p.get('date', '')} {str(p.get('time', ''))[:5]}".strip()}])
+        self.on_event("close", {"ticker": p["ticker"], "why": why, "result": res, "lots": lots, "pnl": pnl})
+        self._push()
 
     def _mid_half_exits(self, p, px, s):
         """«Движение дня», тейк частями: на хае дня (для шорта — на лое) закрыть mhalf позиции, стоп сразу в безубыток,
@@ -1848,7 +1970,9 @@ class AutoTrader:
         except sc.CertError:
             raise
         except Exception as e:
-            self.log(f"  {p['ticker']}: не удалось закрыть ({e}) — повторю через {STOP_POLL} с")
+            self.log(f"  {p['ticker']}: не удалось закрыть ({e}) — проверяю позицию на бирже")
+            self._rec_t = 0
+            threading.Thread(target=lambda: self._reconcile(self.clock(), force=True), daemon=True).start()
             return False
         exit_px = fill or px
         res = p["side"] * (exit_px / p["entry"] - 1)
@@ -1856,6 +1980,11 @@ class AutoTrader:
             p["lots"] -= lots
         else:
             self.positions.remove(p)
+            if p.get("ex_stop") and hasattr(self.b, "set_stop"):
+                try:
+                    self.b.set_stop(p["ticker"], p["side"], 0, None)     # снять страховочный стоп (Binance: отменить заявку)
+                except Exception:
+                    pass
         self.st["results"].append([p.get("strat", "15"), res])
         self._save()
         try:
