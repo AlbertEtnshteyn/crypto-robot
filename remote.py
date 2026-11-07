@@ -116,7 +116,7 @@ class RemoteRobot:
                             if px:
                                 p["last"] = px
                                 if p.get("mult"):
-                                    p["pnl_rub"] = round(p["side"] * (px - p["entry"]) * p["mult"], 2)
+                                    p["pnl_rub"] = round(p["side"] * (px - p["entry"]) * p["mult"] - (p.get("cost") or 0), 2)
                         if self.on_live:
                             self.on_live(P, m.get("idx"))
             except Exception:

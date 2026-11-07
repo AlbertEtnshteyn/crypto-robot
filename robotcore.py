@@ -2,7 +2,8 @@
 """Общее для программы на Windows и сервера: настройки, параметры робота, данные для графика."""
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+_UTC = timezone.utc
 
 import scanner as sc
 import autotrader as at
@@ -215,7 +216,7 @@ def real_trades(ticker):
 
 
 def strat_summary(rows):
-    """Сводка по закрытым сделкам: число, в плюсе, итог ₽ (где известен), средний %."""
+    """Сводка по закрытым сделкам: число, в плюсе, итог USDT (чистый: после комиссии и фандинга), средний %."""
     res = [x for x in (_num(t.get("result_pct")) for t in rows) if x is not None]
     pnl = [x for x in (_num(t.get("pnl_rub")) for t in rows) if x is not None]
     return {"n": len(res), "wins": sum(1 for x in res if x > 0), "pnl_rub": round(sum(pnl), 2) if pnl else None,
@@ -299,8 +300,10 @@ def results(balance_now=None):
         res = [x for x in res if x is not None]
         pnl = [_num(t.get("pnl_rub")) for t in tr]
         pnl = [x for x in pnl if x is not None]
+        fees = sum(_num(t.get("fee")) or 0 for t in tr)
+        fund = sum(_num(t.get("funding")) or 0 for t in tr)
         row.update(trades=len(res), wins=sum(1 for x in res if x > 0), avg_pct=round(sum(res) / len(res), 3) if res else None,
-                   pnl_rub=round(sum(pnl), 2) if pnl else None, pnl_known=len(pnl),
+                   pnl_rub=round(sum(pnl), 2) if pnl else None, pnl_known=len(pnl), fees=round(fees, 2), funding=round(fund, 2),
                    by_strat={s: strat_summary([t for t in tr if t["strat"] == s]) for s in ("всплеск", "15:00", "вручную")})
         out.append(row)
     # баланс по дням (последнее значение дня) — для графика
@@ -458,7 +461,8 @@ import time
 from datetime import date as _date
 
 BT_DIR = os.path.join(sc.HERE, "history_bt")          # кэш 5-мин свечей для проверки на истории
-BT_COST = 0.0012                                       # комиссия тейкера ~0,05% × 2 + проскальзывание (туда-обратно)
+BT_COST = 0.0012                                       # запасное значение, если тариф не получен (0,055% × 2 + проскальзывание)
+BT_SLIP = 0.0002                                       # проскальзывание рыночных заявок туда-обратно (комиссия — отдельно, по тарифу)
 
 
 def _bt_read(path):
@@ -703,7 +707,7 @@ def bt_run(data, m, imoex=None):
                 hit_take = lambda k_: (rows[k_][2] >= take) if sd > 0 else (rows[k_][3] <= take)
                 res, why, xr = None, "", r
                 half, trl = m.get("half", 0.0), m.get("trail", 0.01)
-                took, part_res, best = False, 0.0, px
+                took, part_res, best, took_k = False, 0.0, px, None
                 if hit_stop(r):
                     res, why = ret(stop), "стоп"
                 else:
@@ -734,7 +738,7 @@ def bt_run(data, m, imoex=None):
                             if not half:
                                 res, why, xr = ret(fill), "тейк", k
                                 break
-                            took, part_res, stop, best = True, half * ret(fill), px, fill   # часть закрыта, стоп в безубыток
+                            took, part_res, stop, best, took_k = True, half * ret(fill), px, fill, k   # часть закрыта, стоп в безубыток
                         if took:                                   # трейлинг-стоп от лучшей цены (после проверки стопа на этой свече)
                             best = max(best, rows[k][2]) if sd > 0 else min(best, rows[k][3])
                             ts = best * (1 - sd * trl)
@@ -745,13 +749,28 @@ def bt_run(data, m, imoex=None):
                         res, why, xr = ret(rows[-1][4]), "конец данных", len(rows) - 1
                         if took:
                             res = part_res + (1 - half) * res
+                # фандинг: на каждой выплате между входом и выходом лонг платит ставку (шорт получает), если ставка > 0;
+                # после частичного тейка — только с оставшейся доли позиции
+                fund = 0.0
+                fl = (m.get("fund") or {}).get(tk)
+                if fl:
+                    t_in = int(rows[r][0].replace(tzinfo=_UTC).timestamp() * 1000)
+                    t_out = int(rows[xr][0].replace(tzinfo=_UTC).timestamp() * 1000) + 300_000
+                    t_tk = int(rows[took_k][0].replace(tzinfo=_UTC).timestamp() * 1000) if took_k is not None else None
+                    for ft, rate in fl:
+                        if t_in < ft <= t_out:
+                            frac = (1 - half) if (t_tk is not None and ft > t_tk) else 1.0
+                            fund -= sd * rate * frac
+                cost = m.get("cost", BT_COST)
                 xp = px * (1 + sd * res)                         # средняя цена выхода (с учётом частичного тейка)
                 prev_in = r
                 busy = xr
                 trades.append({"date": t.strftime("%Y-%m-%d"), "time": t.strftime("%H:%M"), "ticker": tk, "tf": tf, "side": sd,
                                "liq": round(liq), "cap": round(liq * m["liq"]) if m.get("liq") and liq else None,
                                "entry": round(px, 6), "stop": round(stop, 6), "take": round(take, 6), "exit": round(xp, 6),
-                               "exit_time": rows[xr][0].strftime("%d.%m %H:%M"), "reason": why, "pct": round((res - BT_COST) * 100, 3)})
+                               "exit_time": rows[xr][0].strftime("%d.%m %H:%M"), "reason": why,
+                               "gross": round(res * 100, 3), "fee_pct": round(cost * 100, 4), "fund_pct": round(fund * 100, 4),
+                               "pct": round((res - cost + fund) * 100, 3)})
                 if not m["multi"] or why not in ("стоп", "тейк") or xr >= z:
                     break
                 r = xr + 1
@@ -794,6 +813,7 @@ def bt_summary(trades, share, capital=1_000_000):
     for t in trades:
         by_day.setdefault(t["date"], []).append(t)
     eq, peak, dd, dd_rub, curve = float(capital), float(capital), 0.0, 0.0, []
+    fees_rub, fund_rub = 0.0, 0.0
     months = {}
     for d in sorted(by_day):
         start = eq
@@ -804,6 +824,8 @@ def bt_summary(trades, share, capital=1_000_000):
                 stake = min(stake, t["cap"])                       # не больше доли дневного оборота бумаги
             t["stake"] = round(stake)
             t["rub"] = round(stake * t["pct"] / 100, 2)
+            fees_rub += stake * (t.get("fee_pct") or 0) / 100
+            fund_rub += stake * (t.get("fund_pct") or 0) / 100
             eq += t["rub"]
             mo["n"] += 1
             mo["sum"] += t["pct"]
@@ -820,7 +842,7 @@ def bt_summary(trades, share, capital=1_000_000):
             "capital": capital, "final": round(eq, 2), "profit_rub": round(eq - capital, 2), "profit_pct": round((eq / capital - 1) * 100, 2),
             "pf": round(sum(win) / -sum(los), 2) if los and sum(los) < 0 else None,
             "avg_win": round(sum(win) / len(win), 3) if win else None, "avg_loss": round(sum(los) / len(los), 3) if los else None,
-            "reasons": reasons, "curve": curve,
+            "reasons": reasons, "curve": curve, "fees": round(fees_rub, 2), "funding": round(fund_rub, 2),
             "months": [{"m": v["m"], "n": v["n"], "sum": round(v["sum"], 2), "rub": round(v["rub"], 2),
                         "eq": round(v["rub"] / v["start"] * 100, 2)} for _, v in sorted(months.items())]}
 
@@ -933,6 +955,20 @@ class Backtest:
                     btc = bt_btc(bt_bars(ti, token, sc.INDEX, since, log))
                 except Exception as e:
                     log(f"BTC для режима «по BTC» не получен ({e}) — фильтр в проверке не учитывается")
+            # комиссия — по тарифу счёта (ключ из настроек), иначе базовый тариф биржи; платим тейкер на входе и выходе
+            ex_ = s.get("exchange", "bybit")
+            acc = f"{ex_}_{s.get('mode', 'demo')}"
+            try:
+                import exchange as exm
+                xt = exm.Exchange(ex_, s.get("mode", "demo"), s.get(acc + "_key", ""), s.get(acc + "_secret", ""))
+                taker = xt.fee_rate("BTCUSDT")[0]
+                fee_src = getattr(xt, "fee_src", "тариф")
+            except Exception as e:
+                taker, fee_src = 0.00055, f"базовый тариф ({e})"
+            m["cost"] = 2 * taker + BT_SLIP
+            m["fund"] = {}
+            fund_fail = 0
+            t0_ms = int(datetime(since.year, since.month, since.day, tzinfo=sc.MSK).timestamp() * 1000)
             # по одной монете: скачать → посчитать → забыть свечи (память сервера не растёт с числом монет)
             trades, fails, done_n = [], [], 0
             for n, tk in enumerate(tickers, 1):
@@ -948,6 +984,12 @@ class Backtest:
                     continue
                 if rows:
                     done_n += 1
+                    try:                                  # ставки фандинга монеты за период (открытые данные биржи)
+                        m["fund"] = {tk: sc.EX().funding_history(tk, t0_ms, int(time.time() * 1000))}
+                    except Exception as e:
+                        fund_fail += 1
+                        m["fund"] = {}
+                        log(f"  {tk}: история фандинга не получена ({e}) — в этой монете фандинг не учтён")
                     trades += bt_run({tk: rows}, m, btc)
                 del rows
             trades.sort(key=lambda x: (x["date"], x["time"]))
@@ -974,7 +1016,9 @@ class Backtest:
                              + (f", но не больше {m['liq'] * 100:g}% дневного оборота монеты" if m["liq"] else "")
                              + (f", оборот не меньше {m['min_turn'] / 1e6:g} млн USDT/день" if m["min_turn"] else "")
                              + (f", объём сегодня не меньше {m['min_vol'] / 1e6:g} млн USDT" if m.get("min_vol") else "") + "; "
-                             f"монеты: {', '.join(dict(at.MARKETS).get(x, x) for x in dm)}; затраты {BT_COST * 100:g}% на сделку"),
+                             f"монеты: {', '.join(dict(at.MARKETS).get(x, x) for x in dm)}; комиссия {taker * 100:.4g}% × 2 ({fee_src}) "
+                             f"+ проскальзывание {BT_SLIP * 100:g}% = {m['cost'] * 100:.3g}% на сделку; фандинг — по фактическим ставкам {sc.exchange_name()}"
+                             + (f" (не получен по {fund_fail} монетам)" if fund_fail else "")),
                 "done": sc.msk().strftime("%d.%m %H:%M")}
             self.state.update(progress="готово", pct=100)
         except Exception as e:

@@ -124,7 +124,7 @@ function liveApply() {
   const G = {}, T = { pnl_rub: 0, known: 0 };
   for (const p of P) {
     const px = LV.p[p.ticker];
-    if (px) { p.last = px; if (p.mult) p.pnl_rub = p.side * (px - p.entry) * p.mult; }
+    if (px) { p.last = px; if (p.mult) p.pnl_rub = p.side * (px - p.entry) * p.mult - (p.cost || 0); }
     const res = p.last ? p.side * (p.last / p.entry - 1) * 100 : null;
     const g = G[grpKey(p)] || (G[grpKey(p)] = { pct: [], pnl_rub: 0, known: 0 });
     if (res != null) g.pct.push(res);
@@ -632,7 +632,8 @@ async function loadResults() {
       <td class="${cls(p.change)}">${rub(p.change, true)}</td><td class="${cls(p.change_pct)}">${pct(p.change_pct)}</td>
       <td>${p.trades}${p.trades ? " · " + Math.round(p.wins / p.trades * 100) + "%" : ""}</td>
       <td class="${cls(p.pnl_rub)}">${rub(p.pnl_rub, true)}</td></tr>` +
-      [["всплеск", "Всплеск + EMA20"], ["15:00", "Движение дня"], ["вручную", "Вручную"]].map(([k, n]) => { const x = (p.by_strat || {})[k] || { n: 0 };
+      ((p.fees || p.funding) ? `<tr class="sub"><td>↳ в т. ч. комиссии / фандинг</td><td></td><td></td><td></td><td>−${(p.fees || 0).toFixed(2)} / ${(p.funding >= 0 ? "+" : "") + (p.funding || 0).toFixed(2)}</td></tr>` : "") +
+      [["15:00", "Движение дня"], ["вручную", "Вручную"]].map(([k, n]) => { const x = (p.by_strat || {})[k] || { n: 0 };
         return `<tr class="sub"><td>↳ ${n}</td><td></td><td class="${cls(x.avg_pct)}">${x.n ? pct(x.avg_pct) + " ср." : ""}</td><td>${x.n}${x.n ? " · " + Math.round(x.wins / x.n * 100) + "%" : ""}</td><td class="${cls(x.pnl_rub)}">${rub(x.pnl_rub, true)}</td></tr>`; }).join("")).join("");
   const el = $("#resChart");
   if (!RCH) {
@@ -867,7 +868,7 @@ async function loadBT() {
   $("#btSum").innerHTML = !S.n ? `<div class="muted">Сделок за период нет.</div>` :
     `<div class="item"><div class="hd"><b>${rub(S.capital)} → ${rub(S.final)}</b><b class="${cls(S.profit_rub)}">${rub(S.profit_rub, true)} (${pct(S.profit_pct)})</b></div>
      <div class="meta">макс. просадка ${rub(S.dd_rub)} (${pct(S.dd, 1)}) · сделок ${S.n} · в плюсе ${S.win}% · средняя ${pct(S.avg)}${S.pf ? " · профит-фактор " + S.pf : ""}<br>
-     прибыльная ${pct(S.avg_win)} · убыточная ${pct(S.avg_loss)} · выходы: ${Object.entries(S.reasons || {}).map(([k, v]) => esc(k) + " " + v).join(", ")}</div></div>`;
+     уже учтены: комиссия −${rub(S.fees || 0)}, фандинг ${rub(S.funding || 0, true)}<br>прибыльная ${pct(S.avg_win)} · убыточная ${pct(S.avg_loss)} · выходы: ${Object.entries(S.reasons || {}).map(([k, v]) => esc(k) + " " + v).join(", ")}</div></div>`;
   $("#btMon").innerHTML = (S.months || []).map((m) => `<div class="item"><div class="hd"><span>${esc(m.m)} · сделок ${m.n}</span><span class="${cls(m.rub)}">${rub(m.rub, true)} · ${pct(m.eq)}</span></div></div>`).join("");
   const tfn = { 5: "5м", 15: "15м", 60: "1ч", 1440: "1д" };
   $("#btTr").innerHTML = (r.trades || []).slice().reverse().slice(0, 300).map((x) =>

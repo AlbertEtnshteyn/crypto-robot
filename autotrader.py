@@ -438,7 +438,8 @@ def history_trades(bars, sp, tf=None, tier="index", window="9-19", late=True, ca
 
 
 IDX_FLIP_BAND = 0.001          # разворот индекса считается, когда он ушёл от открытия больше чем на 0,1% в другую сторону
-LOG_COLS = ["date", "ticker", "side", "lots", "entry", "exit", "reason", "result_pct", "time", "pnl_rub", "entry_time"]
+LOG_COLS = ["date", "ticker", "side", "lots", "entry", "exit", "reason", "result_pct", "time", "pnl_rub", "entry_time",
+            "gross", "fee", "funding"]     # pnl_rub и result_pct — ЧИСТЫЕ: после комиссии (вход + выход) и фандинга, USDT
 BAL_COLS = ["time", "value", "deposit"]
 
 
@@ -567,6 +568,18 @@ class CryptoBroker:
     def positions(self):
         """Позиции на бирже: монета -> количество (минус — шорт)."""
         return self.x.positions()
+
+    def fee_rate(self, tk):
+        """Тейкер (доля) по тарифу счёта: робот входит и выходит рыночными заявками."""
+        return self.x.fee_rate(tk)[0]
+
+    def last_fee(self, tk):
+        """Фактическая комиссия последней заявки по монете, USDT (None — неизвестна)."""
+        f = self.x.last_fill.pop(tk, None)
+        return f.get("fee") if f else None
+
+    def funding(self, tk, since_ms):
+        return self.x.funding(tk, since_ms)
 
     def set_stop(self, tk, side, lots, stop):
         self.x.set_stop(tk, side, lots * self.x.share(tk)["lot"], stop)
@@ -794,12 +807,23 @@ class AutoTrader:
         return out
 
     def _pos_view(self, p):
-        """Позиция для экрана: текущая цена и результат в ₽ (без комиссий)."""
+        """Позиция для экрана: текущая цена и ЧИСТЫЙ результат в USDT — за вычетом комиссии входа, комиссии выхода
+        (по тарифу, если закрыть сейчас) и с фандингом, начисленным на сейчас. cost — эти затраты (для пересчёта по живой цене)."""
         last = self.prices.get(p["ticker"])
         per_lot = p.get("per_lot") or (self._terms_cache.get(p["ticker"]) or (None, None))[1]
-        pnl = p["side"] * (last - p["entry"]) * p["lots"] * per_lot if last and per_lot else None
-        return dict(p, last=last, pnl_rub=round(pnl, 2) if pnl is not None else None,
-                    mult=p["lots"] * per_lot if per_lot else None)
+        qty = p["lots"] * per_lot if per_lot else None
+        cost = None
+        if qty:
+            cost = p.get("fee_in", 0.0) + (last or p["entry"]) * qty * self._taker_cached(p["ticker"]) - (p.get("funding", 0.0) - p.get("funding_done", 0.0))
+        pnl = p["side"] * (last - p["entry"]) * qty - cost if last and qty else None
+        return dict(p, last=last, pnl_rub=round(pnl, 2) if pnl is not None else None, mult=qty, cost=round(cost, 4) if cost is not None else 0.0)
+
+    def _taker_cached(self, tk):
+        c = getattr(self, "_tk_cache", {})
+        self._tk_cache = c
+        if tk not in c:
+            c[tk] = self._taker(tk)
+        return c[tk]
 
     def _balance(self, now):
         """Стоимость счёта по текущим ценам (с открытыми позициями) раз в минуту; в файл — при изменении (не чаще 10 мин) или раз в 30 минут."""
@@ -891,6 +915,7 @@ class AutoTrader:
         secs = t * 60 + now.second
         self._balance(now)
         self._reconcile(now)
+        self._refresh_funding()
         # 1) сопровождение позиций: выход по времени, стоп, тейк
         if self.positions:
             today = now.date().isoformat()
@@ -1643,6 +1668,7 @@ class AutoTrader:
             self.log(f"  {tk}: заявка отклонена: {e}")
             return
         entry = fill or px
+        fee_in = self._fee_of(tk, entry, lots * per_lot)
         stop = stop_level if stop_level is not None else entry * (1 - side * sc.STOP)
         if strat in ("manual", "mid"):
             take1, take2 = t1, None                                                # ручная позиция: один тейк — закрыть всё
@@ -1673,6 +1699,9 @@ class AutoTrader:
             pos["carry_date"] = now_t.date().isoformat()     # вошли после времени выхода — выход завтра
             pos["overnight"] = True
         pos["opened_t"] = self.clock().timestamp()
+        pos["fee_in"] = fee_in                         # комиссия входа, USDT (фактическая или по тарифу)
+        pos["fund_t"] = int(time.time() * 1000) - 1000  # с этого момента считается фандинг позиции
+        pos["funding"] = 0.0
         self.positions.append(pos)
         self._save()
         self._sync_ex_stops()
@@ -1821,23 +1850,83 @@ class AutoTrader:
             self.log("На бирже есть позиции, которые робот не открывал (не трогаю): " + ", ".join(alien))
         self._alien = alien
 
+    def _fee_of(self, tk, px, qty):
+        """Комиссия только что исполненной заявки: фактическая с биржи, иначе по тарифу счёта (тейкер)."""
+        f = None
+        if hasattr(self.b, "last_fee"):
+            try:
+                f = self.b.last_fee(tk)
+            except Exception:
+                f = None
+        if f is None:
+            f = px * qty * self._taker(tk)
+        return float(f)
+
+    def _taker(self, tk):
+        try:
+            return float(self.b.fee_rate(tk)) if hasattr(self.b, "fee_rate") else 0.0
+        except Exception:
+            return 0.00055
+
+    def _funding_since(self, p):
+        """Фактический фандинг по позиции с прошлого учёта (USDT, плюс — получили) и сдвиг точки отсчёта."""
+        if not hasattr(self.b, "funding") or not p.get("fund_t"):
+            return 0.0
+        try:
+            f = float(self.b.funding(p["ticker"], p["fund_t"]) or 0.0)
+        except Exception as e:
+            self.log(f"  {p['ticker']}: фандинг не получен ({e}) — в итоге сделки его нет")
+            return 0.0
+        p["fund_t"] = int(time.time() * 1000)
+        return f
+
+    def _net(self, p, lots, exit_px, fee_out, funding):
+        """Чистый итог закрываемой части: цена − комиссия входа (доля этой части) − комиссия выхода + фандинг."""
+        per = p.get("per_lot") or self._terms(p["ticker"])[1]
+        qty = lots * per
+        gross = p["side"] * (exit_px - p["entry"]) * qty
+        part = lots / p["lots"] if p["lots"] else 1.0
+        fee_in = p.get("fee_in", 0.0) * part
+        p["fee_in"] = p.get("fee_in", 0.0) - fee_in
+        fee = fee_in + fee_out
+        net = gross - fee + funding
+        res = net / (p["entry"] * qty) if qty else 0.0
+        return gross, fee, net, res
+
+    def _refresh_funding(self):
+        """Фандинг открытых позиций — для экрана (раз в 10 минут)."""
+        if not self.positions or not hasattr(self.b, "funding"):
+            return
+        if time.time() - getattr(self, "_fund_ref_t", 0) < 600:
+            return
+        self._fund_ref_t = time.time()
+        for p in list(self.positions):
+            try:
+                p["funding"] = p.get("funding_done", 0.0) + float(self.b.funding(p["ticker"], p["fund_t"]) or 0.0)
+            except Exception:
+                pass
+
     def _forget(self, p, px, why):
         """Позиция уже закрыта на бирже — убрать у робота и записать в журнал (по последней цене, без заявки)."""
         if p not in self.positions:
             return
-        res = p["side"] * (px / p["entry"] - 1)
         lots = p["lots"]
+        per = p.get("per_lot") or 1
+        fee_out = px * lots * per * self._taker(p["ticker"])          # закрыла биржа — комиссия по тарифу (тейкер)
+        fund = self._funding_since(p)
+        gross, fee, pnl, res = self._net(p, lots, px, fee_out, fund)
         self.positions.remove(p)
         self.st["results"].append([p.get("strat", "15"), res])
         self._save()
-        pnl = p["side"] * (px - p["entry"]) * lots * (p.get("per_lot") or 1)
-        self.log(f"  {p['ticker']}: {why} — у робота закрыта по ~{px:.6g}, результат {res * 100:+.2f}%, " + f"{pnl:+,.2f}".replace(",", " ") + " USDT")
+        self.log(f"  {p['ticker']}: {why} — у робота закрыта по ~{px:.6g}, итог {res * 100:+.2f}%, " + f"{pnl:+,.2f}".replace(",", " ")
+                 + f" USDT (цена {gross:+.2f}, комиссия −{fee:.2f}, фандинг {fund:+.2f})")
         sc.append_rows(sc.MANUAL_LOG if p.get("strat") == "manual" else sc.SANDBOX_LOG, LOG_COLS,
                        [{"date": self.st.get("date") or self.clock().date().isoformat(), "ticker": p["ticker"],
                          "side": "лонг" if p["side"] > 0 else "шорт", "lots": round(lots * (p.get("per_lot") or 1), 8),
                          "entry": round(p["entry"], 6), "exit": round(px, 6), "reason": why, "result_pct": round(res * 100, 4),
                          "time": sc.msk(self.clock()).strftime("%Y-%m-%d %H:%M"), "pnl_rub": round(pnl, 2),
-                         "entry_time": f"{p.get('date', '')} {str(p.get('time', ''))[:5]}".strip()}])
+                         "entry_time": f"{p.get('date', '')} {str(p.get('time', ''))[:5]}".strip(),
+                         "gross": round(gross, 4), "fee": round(fee, 4), "funding": round(fund, 4)}])
         self.on_event("close", {"ticker": p["ticker"], "why": why, "result": res, "lots": lots, "pnl": pnl})
         self._push()
 
@@ -1975,7 +2064,11 @@ class AutoTrader:
             threading.Thread(target=lambda: self._reconcile(self.clock(), force=True), daemon=True).start()
             return False
         exit_px = fill or px
-        res = p["side"] * (exit_px / p["entry"] - 1)
+        per = p.get("per_lot") or self._terms(p["ticker"])[1]
+        fee_out = self._fee_of(p["ticker"], exit_px, lots * per)
+        fund = self._funding_since(p)
+        p["funding_done"] = p.get("funding_done", 0.0) + fund
+        gross, fee, pnl_rub, res = self._net(p, lots, exit_px, fee_out, fund)
         if lots < p["lots"]:
             p["lots"] -= lots
         else:
@@ -1987,19 +2080,16 @@ class AutoTrader:
                     pass
         self.st["results"].append([p.get("strat", "15"), res])
         self._save()
-        try:
-            pnl_rub = p["side"] * (exit_px - p["entry"]) * lots * self._terms(p["ticker"])[1]     # USDT без комиссий
-        except Exception:
-            pnl_rub = None
-        self.log(f"  {p['ticker']}: закрыто ({why}) по ~{exit_px:.6g}, результат {res * 100:+.2f}%"
-                 + ((", " + f"{pnl_rub:+,.2f}".replace(",", " ") + " USDT") if pnl_rub is not None else "")
+        self.log(f"  {p['ticker']}: закрыто ({why}) по ~{exit_px:.6g}, итог {res * 100:+.2f}%"
+                 + ", " + f"{pnl_rub:+,.2f}".replace(",", " ") + f" USDT (цена {gross:+.2f}, комиссия −{fee:.2f}, фандинг {fund:+.2f})"
                  + (" [всплеск]" if p.get("strat") == "spike" else " [вручную]" if p.get("strat") == "manual" else ""))
         sc.append_rows(sc.SPIKE_LOG if p.get("strat") == "spike" else sc.MANUAL_LOG if p.get("strat") == "manual" else sc.SANDBOX_LOG, LOG_COLS,
                        [{"date": self.st.get("date") or self.clock().date().isoformat(), "ticker": p["ticker"],
                          "side": "лонг" if p["side"] > 0 else "шорт", "lots": round(lots * (p.get("per_lot") or 1), 8), "entry": round(p["entry"], 6),
                          "exit": round(exit_px, 6), "reason": why, "result_pct": round(res * 100, 4),
-                         "time": sc.msk(self.clock()).strftime("%Y-%m-%d %H:%M"), "pnl_rub": round(pnl_rub, 2) if pnl_rub is not None else "",
-                         "entry_time": f"{p.get('date', '')} {str(p.get('time', ''))[:5]}".strip()}])
+                         "time": sc.msk(self.clock()).strftime("%Y-%m-%d %H:%M"), "pnl_rub": round(pnl_rub, 2),
+                         "entry_time": f"{p.get('date', '')} {str(p.get('time', ''))[:5]}".strip(),
+                         "gross": round(gross, 4), "fee": round(fee, 4), "funding": round(fund, 4)}])
         self.on_event("close", {"ticker": p["ticker"], "why": why, "result": res, "lots": lots, "pnl": pnl_rub})
         self._push()
         return True

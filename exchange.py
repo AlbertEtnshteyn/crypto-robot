@@ -104,6 +104,9 @@ def _f(x, default=0.0):
         return default
 
 
+# Базовый тариф USDT-фьючерсов (тейкер, мейкер), если тариф счёта не получен. Рыночные заявки робота — тейкер.
+DEFAULT_FEES = {"bybit": (0.00055, 0.0002), "binance": (0.0005, 0.0002)}
+
 HINTS = {
     10001: "", -4061: " — включите на бирже режим позиций «односторонний» (One-Way), робот работает только в нём",
     10003: " — ключ API неверный или для другого счёта (демо/реальный)", 10004: " — неверный secret ключа API",
@@ -154,6 +157,8 @@ class Exchange:
         self._tick_t = 0
         self._px, self._px_t = {}, 0  # Binance: последние цены всех монет
         self._stops = {}              # Binance: symbol -> номер страховочной стоп-заявки
+        self._fees = {}               # symbol -> (тейкер, мейкер, время) — тариф счёта
+        self.last_fill = {}           # symbol -> {"px", "qty", "fee"} последней заявки (комиссия — фактическая, USDT)
         self._dt = 0              # поправка часов для подписи, мс
         self._lev = {}            # symbol -> установленное плечо
         self._lock = threading.Lock()
@@ -473,6 +478,97 @@ class Exchange:
         self._lev[sym] = lev
         return lev
 
+    def fee_rate(self, sym="BTCUSDT"):
+        """Комиссия по тарифу счёта (доли): (тейкер, мейкер). Берётся у биржи по ключу API — с учётом уровня (VIP)
+        и скидок счёта; кэш 6 часов. Без ключа — базовый тариф биржи (DEFAULT_FEES), это отмечается в отчётах."""
+        c = self._fees.get(sym)
+        if c and time.time() - c[2] < 6 * 3600:
+            return c[0], c[1]
+        tk, mk = DEFAULT_FEES[self.ex]
+        if self.key and self.secret:
+            try:
+                if self.ex == "bybit":
+                    lst = self._priv("GET", "/v5/account/fee-rate", {"category": "linear", "symbol": sym}).get("list") or []
+                    if lst:
+                        tk, mk = _f(lst[0].get("takerFeeRate"), tk), _f(lst[0].get("makerFeeRate"), mk)
+                else:
+                    js = self._priv("GET", "/fapi/v1/commissionRate", {"symbol": sym})
+                    tk, mk = _f(js.get("takerCommissionRate"), tk), _f(js.get("makerCommissionRate"), mk)
+                self._fees[sym] = (tk, mk, time.time())
+                self.fee_src = "тариф счёта"
+            except Exception:
+                self.fee_src = "базовый тариф биржи (тариф счёта не получен)"
+        else:
+            self.fee_src = "базовый тариф биржи (ключ не введён)"
+        return tk, mk
+
+    def funding(self, sym, since_ms, until_ms=None):
+        """Фандинг по монете на счёте с момента since_ms (фактические начисления биржи), USDT:
+        плюс — получили, минус — заплатили. Bybit — журнал операций (SETTLEMENT), Binance — /income FUNDING_FEE."""
+        until_ms = until_ms or int(time.time() * 1000) + 60_000
+        total = 0.0
+        if self.ex == "bybit":
+            a = int(since_ms)
+            while a < until_ms:                        # журнал Bybit отдаёт не больше 7 дней за запрос
+                b = min(until_ms, a + 7 * 86400_000 - 1)
+                cursor = None
+                for _ in range(20):
+                    js = self._priv("GET", "/v5/account/transaction-log", {"accountType": "UNIFIED", "category": "linear",
+                                                                         "type": "SETTLEMENT", "startTime": a, "endTime": b,
+                                                                         "limit": 50, "cursor": cursor})
+                    for x in js.get("list", []):
+                        if x.get("symbol") == sym:
+                            total -= _f(x.get("funding"))          # у Bybit плюс — списано, минус — получено
+                    cursor = js.get("nextPageCursor")
+                    if not cursor:
+                        break
+                a = b + 1
+            return total
+        js = self._priv("GET", "/fapi/v1/income", {"symbol": sym, "incomeType": "FUNDING_FEE", "startTime": int(since_ms),
+                                                  "endTime": int(until_ms), "limit": 1000})
+        for x in js or []:
+            total += _f(x.get("income"))                          # у Binance плюс — получено, минус — заплачено
+        return total
+
+    def funding_history(self, sym, start_ms, end_ms):
+        """Ставки фандинга за период (открытые данные): [(время мс, ставка)]. Ставка > 0 — лонг платит шорту."""
+        out = []
+        if self.ex == "bybit":                         # Bybit отдаёт от конца периода назад — листаем к началу
+            e = int(end_ms)
+            for _ in range(100):
+                js = self._get_pub("/v5/market/funding/history", {"category": "linear", "symbol": sym, "startTime": int(start_ms),
+                                                                  "endTime": e, "limit": 200})
+                rows = [(int(x["fundingRateTimestamp"]), _f(x.get("fundingRate"))) for x in js.get("list", [])]
+                rows = [r for r in rows if int(start_ms) <= r[0] <= e]
+                out += rows
+                if len(rows) < 200:
+                    break
+                e = min(r[0] for r in rows) - 1
+            return sorted(set(out))
+        a = int(start_ms)
+        for _ in range(100):
+            js = self._get_pub("/fapi/v1/fundingRate", {"symbol": sym, "startTime": a, "endTime": int(end_ms), "limit": 1000})
+            rows = sorted((int(x["fundingTime"]), _f(x.get("fundingRate"))) for x in (js or []))
+            rows = [r for r in rows if r[0] >= a]
+            out += rows
+            if len(rows) < 1000:
+                break
+            a = rows[-1][0] + 1
+        return out
+
+    def _binance_fill_fee(self, sym, order_id):
+        """Фактическая комиссия исполненной заявки Binance (USDT) — из сделок счёта по номеру заявки."""
+        try:
+            trs = self._priv("GET", "/fapi/v1/userTrades", {"symbol": sym, "orderId": order_id, "limit": 50})
+            fee = 0.0
+            for t in trs or []:
+                c = _f(t.get("commission"))
+                a = t.get("commissionAsset") or "USDT"
+                fee += c if a in ("USDT", "USDC") else c * _f(t.get("price"))
+            return fee if trs else None
+        except ExchangeError:
+            return None
+
     def order(self, sym, qty, side, reduce=False):
         """Рыночная заявка: side > 0 — купить, < 0 — продать. reduce=True — только уменьшение позиции (закрытие).
         У каждой заявки свой номер (clientId): если ответ потерялся, робот спрашивает биржу по этому номеру,
@@ -507,6 +603,10 @@ class Exchange:
                     raise ExchangeError(f"Bybit отклонил заявку: {o.get('rejectReason') or o.get('orderStatus')}")
                 px = _f(o.get("avgPrice"))
                 if px and o.get("orderStatus") in ("Filled", "PartiallyFilledCanceled"):
+                    q_ = _f(o.get("cumExecQty")) or float(qs)
+                    fee = o.get("cumExecFee")
+                    self.last_fill[sym] = {"px": px, "qty": q_, "fee": abs(_f(fee)) if fee not in (None, "") else
+                                           px * q_ * self.fee_rate(sym)[0]}
                     return px
             raise ExchangeError("Bybit: заявка не найдена — похоже, не дошла до биржи")
         p = {"symbol": sym, "side": "BUY" if side > 0 else "SELL", "type": "MARKET", "quantity": qs,
@@ -529,7 +629,13 @@ class Exchange:
                 raise ExchangeError("Binance: нет ответа — состояние заявки неизвестно, проверю позицию")
         if js.get("status") in ("REJECTED", "EXPIRED") and not _f(js.get("executedQty")):
             raise ExchangeError(f"Binance отклонил заявку: {js.get('status')}")
-        return _f(js.get("avgPrice")) or None
+        px = _f(js.get("avgPrice")) or None
+        q_ = _f(js.get("executedQty")) or float(qs)
+        fee = self._binance_fill_fee(sym, js.get("orderId")) if js.get("orderId") else None
+        if fee is None and px:
+            fee = px * q_ * self.fee_rate(sym)[0]          # фактическая не получена — по тарифу счёта (тейкер)
+        self.last_fill[sym] = {"px": px, "qty": q_, "fee": fee}
+        return px
 
     def set_stop(self, sym, side, qty, stop):
         """Страховочный стоп на бирже на всю позицию (срабатывает, даже если робот или сервер недоступен).
@@ -587,6 +693,9 @@ class Exchange:
                             out.append(f"✘ {self.title}: включён режим хеджирования — переключите на «односторонний» (One-Way), иначе заявки не пройдут")
                     except ExchangeError:
                         pass
+                tkr, mkr = self.fee_rate("BTCUSDT")
+                out.append(f"  комиссия ({getattr(self, 'fee_src', 'тариф')}): тейкер {tkr * 100:.4g}%, мейкер {mkr * 100:.4g}% — "
+                           "робот входит и выходит рыночными заявками, платит тейкер")
                 t1 = time.time()
                 self._priv("GET", "/v5/account/wallet-balance" if self.ex == "bybit" else "/fapi/v2/balance",
                            {"accountType": "UNIFIED"} if self.ex == "bybit" else {})

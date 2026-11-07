@@ -328,8 +328,8 @@ class App(tk.Tk):
         self.res_cv.bind("<Configure>", lambda _: self._draw_balance())
         ttk.Label(t7, foreground="#555", wraplength=1000, justify="left", text=(
             "Изменение баланса — по стоимости счёта на бирже в USDT (с учётом открытых позиций); "
-            "баланс записывается каждые несколько минут, пока работает робот. Сделки и «итог сделок, USDT» — по закрытым сделкам "
-            "робота, без комиссий.")).pack(anchor="w", pady=4)
+            "баланс записывается каждые несколько минут, пока работает робот. «Итог сделок, USDT» — чистый: по закрытым сделкам "
+            "после комиссии биржи (фактической или по тарифу счёта) и фандинга.")).pack(anchor="w", pady=4)
         self._res = None
         nb.bind("<<NotebookTabChanged>>", lambda _: self.refresh_results() if nb.select() == str(t7) else None, add="+")
         self.after(5000, self._results_tick)
@@ -1125,7 +1125,7 @@ class App(tk.Tk):
                     continue
                 p["last"] = px
                 if p.get("mult"):
-                    p["pnl_rub"] = round(p["side"] * (px - p["entry"]) * p["mult"], 2)
+                    p["pnl_rub"] = round(p["side"] * (px - p["entry"]) * p["mult"] - (p.get("cost") or 0), 2)
                 res = p["side"] * (px / p["entry"] - 1)
                 try:
                     self.pos_tree.set(iid, "last", f"{px:.4g}")
@@ -1383,7 +1383,7 @@ class App(tk.Tk):
             rub = lambda v, sg=False: (("+" if sg and v > 0 else "") + f"{v:,.2f}".replace(",", " ") + " USDT")
             self.bt_sum.configure(fg="#0a7a2f" if sm["profit_rub"] > 0 else "#b3261e", text=(
                 f"Стартовая сумма {rub(sm['capital'])} → {rub(sm['final'])} · прибыль {rub(sm['profit_rub'], True)} ({sm['profit_pct']:+.2f}%) · "
-                f"макс. просадка {rub(sm['dd_rub'])} ({sm['dd']:.1f}%)\n"
+                f"макс. просадка {rub(sm['dd_rub'])} ({sm['dd']:.1f}%) · уже учтены: комиссия −{rub(sm.get('fees', 0))}, фандинг {rub(sm.get('funding', 0), True)}\n"
                 f"Сделок {sm['n']} · в плюсе {sm['win']:g}% · средняя {sm['avg']:+.2f}%" + (f" · профит-фактор {sm['pf']:g}" if sm.get("pf") else "")
                 + f"\nсредняя прибыльная {sm.get('avg_win') or 0:+.2f}%, убыточная {sm.get('avg_loss') or 0:+.2f}% · выходы: {rs}"))
         self.bt_mon.delete(*self.bt_mon.get_children())
@@ -1890,6 +1890,10 @@ class App(tk.Tk):
                 fmt(ch, True), f"{p['change_pct']:+.2f}%" if p.get("change_pct") is not None else "—",
                 p.get("trades", 0), f"{p['wins'] / p['trades'] * 100:.0f}%" if p.get("trades") else "—",
                 fmt(p.get("pnl_rub"), True), f"{p['avg_pct']:+.2f}%" if p.get("avg_pct") is not None else "—"))
+            if p.get("fees") or p.get("funding"):
+                self.res_tree.insert("", "end", tags=("sub",), values=(
+                    "   ↳ в т. ч. комиссии / фандинг", "", "", "", "", "", "",
+                    f"−{p.get('fees', 0):,.2f} / {p.get('funding', 0):+,.2f}".replace(",", " "), ""))
             for k, n in (("15:00", "Движение дня"), ("вручную", "Вручную")):
                 x = bs.get(k) or {"n": 0}
                 self.res_tree.insert("", "end", tags=("sub",), values=(
