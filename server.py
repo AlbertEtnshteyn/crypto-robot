@@ -451,7 +451,8 @@ def market():
     with _MARKET_LOCK:
         if _MARKET["data"] and time.time() - _MARKET["t"] < 20:
             return _MARKET["data"]
-        data = rc.market_overview()
+        rb = ROBOT.robot if ROBOT and ROBOT.running() else None
+        data = rc.market_overview(known_opens=dict(getattr(rb, "opens", {}) or {}) if rb else None)
         _MARKET.update(t=time.time(), data=data)
         return data
 

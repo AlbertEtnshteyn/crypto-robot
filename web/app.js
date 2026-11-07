@@ -841,7 +841,7 @@ function start() {
   if (!liveLoop.started) { liveLoop.started = true; liveLoop(); }   // живые цены — потоком, сразу при каждой сделке
   loadResults(); setInterval(() => { if (!document.hidden) loadResults(); }, 60000);
   loadCalendar(); setInterval(() => { if (!document.hidden) loadCalendar(); }, 30 * 60000);
-  setInterval(() => { if (!document.hidden && TAB === "chart" && CH.data) loadChart(true); }, 60000);
+  setInterval(() => { if (!document.hidden && TAB === "chart" && CH.data) loadChart(true); }, 300000);   // полная перезагрузка — раз в 5 мин (свежие свечи и так каждые 3 с)
   setInterval(() => { if (!document.hidden && TAB === "chart" && CH.data) chartTail(); }, 3000);   // последние свечи — каждые 3 с
   setInterval(() => { if (!document.hidden && TAB === "chart" && CH.data) chartLive(); }, 1000);   // живая цена — каждую секунду
 }

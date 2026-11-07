@@ -1758,7 +1758,7 @@ class App(tk.Tk):
                 if rr is not None and hasattr(rr, "c"):
                     data = rr.c.get("/api/market")            # с сервера
                 else:
-                    data = rc.market_overview()
+                    data = rc.market_overview(known_opens=dict(getattr(rr, "opens", {}) or {}) if rr else None)
                     data = rc.attach_formations(data, list(getattr(rr, "spikes", []) or []))
                 self.q.put(("call", self._show_market, data))
             except Exception as e:

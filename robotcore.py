@@ -321,7 +321,7 @@ def avg_turnover(days=10):
     return {}
 
 
-def market_overview(tier_map=None, live_prices=None):
+def market_overview(tier_map=None, live_prices=None, known_opens=None):
     """Все USDT-фьючерсы выбранной биржи: цена, изменение от начала дня (03:00 МСК) и за 24 часа, оборот за 24 часа."""
     rows, errors = [], []
     x = sc.EX()
@@ -330,7 +330,7 @@ def market_overview(tier_map=None, live_prices=None):
         ins = x.instruments()
         top20 = set(x.top_symbols(20))
         top100 = set(x.top_symbols(100))
-        opens = _day_opens(x, list(top100))
+        opens = _day_opens(x, list(top100), known_opens)
         for sym, t in tk.items():
             if sym not in ins:
                 continue
@@ -352,23 +352,22 @@ def market_overview(tier_map=None, live_prices=None):
 _OPENS = {"day": None, "data": {}}
 
 
-def _day_opens(x, syms):
-    """Цена в начале дня (00:00 UTC) по монетам; докачивается понемногу (до 25 монет за вызов), кэш на день."""
+def _day_opens(x, syms, known=None):
+    """Цена в начале дня (00:00 UTC) по монетам, кэш на день. Что уже знает робот — берётся у него, остальное
+    качается сразу всё, в несколько потоков. Монета, по которой запрос не прошёл, будет запрошена снова в следующий раз."""
     day = datetime.now(sc.MSK).date()
     if _OPENS["day"] != day:
         _OPENS.update(day=day, data={})
     d = _OPENS["data"]
+    for k, v in (known or {}).items():
+        if v and k not in d:
+            d[k] = v
     a = datetime(day.year, day.month, day.day, tzinfo=sc.MSK)
-    n = 0
-    for s_ in syms:
-        if s_ in d or n >= 25:
-            continue
-        n += 1
-        try:
-            r = x.candles(s_, a, a + timedelta(minutes=10), 5)
+    todo = [s_ for s_ in syms if s_ not in d]
+    got = at._parallel(todo, lambda s_: x.candles(s_, a, a + timedelta(minutes=10), 5))
+    for s_, r in got.items():
+        if not isinstance(r, Exception):
             d[s_] = r[0]["o"] if r else None
-        except Exception:
-            d[s_] = None
     return d
 
 
