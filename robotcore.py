@@ -23,7 +23,7 @@ DEFAULTS = {"threshold": 2.0, "entry": "15:00", "capital": 10_000,
             "bybit_demo_key": "", "bybit_demo_secret": "", "bybit_real_key": "", "bybit_real_secret": "",
             "binance_demo_key": "", "binance_demo_secret": "", "binance_real_key": "", "binance_real_secret": "",
             # «Движение дня»: время — по Москве (день начинается в 03:00 МСК = 00:00 UTC); суммы — в USDT
-            "mid_allday": True, "mid_take_mode": "all", "mid_take_part": 50, "mid_trail": 1.0, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5}
+            "mid_allday": True, "mid_swing_stop": True, "mid_take_mode": "all", "mid_take_part": 50, "mid_trail": 1.0, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5}
 SECRET_KEYS = [k for k in DEFAULTS if k.endswith("_key") or k.endswith("_secret")]
 
 CHART_DEPTH = {1: 2, 5: 10, 15: 30, 60: 90, 1440: 400}       # сколько дней истории грузить на график
@@ -114,6 +114,7 @@ def mid_cfg(s):
             "from": 0 if s.get("mid_allday", True) else u(s.get("mid_from", "04:00"), 240),
             "to": 1440 if s.get("mid_allday", True) else (u(s.get("mid_to", "02:00"), 120) or 1440),
             "allday": bool(s.get("mid_allday", True)),
+            "swing_stop": bool(s.get("mid_swing_stop", True)),     # повторный вход — стоп за лоем предыдущего движения
             # тейк на хае дня: «all» — закрыть всё; «half» — закрыть часть, стоп в безубыток, остаток ведёт трейлинг-стоп
             "half": (min(0.95, max(0.05, float(s.get("mid_take_part", 50) or 50) / 100))
                      if s.get("mid_take_mode") == "half" else 0.0),
@@ -639,6 +640,7 @@ def bt_run(data, m, imoex=None):
                 continue
             op = rows[a + ii[0]][1]
             day_from = a                                  # день — с 00:00 UTC (03:00 МСК)
+            prev_in = None                                # строка прошлого входа по монете сегодня
             q, sd = None, 0
             for r in range(a + ii[0], z):
                 x = tm[r - a]
@@ -689,6 +691,10 @@ def bt_run(data, m, imoex=None):
                     stop, take = lo_d * (1 - at.MID_STOP_BUF), hi_d
                 else:
                     stop, take = hi_d * (1 + at.MID_STOP_BUF), lo_d
+                if m.get("multi") and m.get("swing_stop") and prev_in is not None and prev_in < r:
+                    sw = min(x[3] for x in rows[prev_in:r]) if sd > 0 else max(x[2] for x in rows[prev_in:r])
+                    if (px - sw) * sd > 0 and abs(px / sw - 1) >= at.MID_MIN_STOP:   # повторный вход — стоп за лоем предыдущего движения
+                        stop = sw * (1 - sd * at.MID_STOP_BUF)
                 if not ((px - stop) * sd > 0 and (take - px) * sd > 0):
                     r += 1; continue
                 ex_day = di if tm[r - a] < ex else di + 1          # вошли после времени выхода — выход на следующий день
@@ -740,6 +746,7 @@ def bt_run(data, m, imoex=None):
                         if took:
                             res = part_res + (1 - half) * res
                 xp = px * (1 + sd * res)                         # средняя цена выхода (с учётом частичного тейка)
+                prev_in = r
                 busy = xr
                 trades.append({"date": t.strftime("%Y-%m-%d"), "time": t.strftime("%H:%M"), "ticker": tk, "tf": tf, "side": sd,
                                "liq": round(liq), "cap": round(liq * m["liq"]) if m.get("liq") and liq else None,

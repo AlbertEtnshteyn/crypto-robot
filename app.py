@@ -585,6 +585,7 @@ class App(tk.Tk):
         self.v_mref = tk.StringVar(value=self.MREF["0"])
         self.v_mmulti = tk.BooleanVar(value=bool(self.s.get("mid_multi", True)))
         self.v_mallday = tk.BooleanVar(value=bool(self.s.get("mid_allday", True)))
+        self.v_mswing = tk.BooleanVar(value=bool(self.s.get("mid_swing_stop", True)))
         _mm = rc.mid_modes(self.s)
         self.v_mmodes = {k: tk.BooleanVar(value=k in _mm) for k, _ in rc.MID_MODES}
         self.MCARRY = {"none": "закрыть все позиции", "all": "переносить все (до стопа или тейка)", "profit": "переносить только позиции в плюсе"}
@@ -600,7 +601,10 @@ class App(tk.Tk):
             *[ck(n, self.v_mtfs[k]) for k, n in self.MTF.items()])
         markets(b2, self.v_dmk)
         row(b2, "Движение считать:", cb(self.v_mref, list(self.MREF.values()), 40),
-            ck("несколько входов по монете за день", self.v_mmulti))
+            ck("несколько входов по монете за день", self.v_mmulti),
+            ck("2-й и следующие входы — стоп за лоем предыдущего движения", self.v_mswing))
+        row(b2, ("hint", "повторный вход: стоп — за минимумом цены (для шорта — максимумом) с прошлого входа по этой монете, "
+                         "а не за лоем дня; если он ближе 0,3% к цене — стоп за лоем дня"))
         row(b2, "Режим торговли (можно несколько):", *[ck(n, self.v_mmodes[k]) for k, n in rc.MID_MODES[:2]])
         row(b2, "", *[ck(n, self.v_mmodes[k]) for k, n in rc.MID_MODES[2:]])
         row(b2, ("hint", "«индекс» — биткоин от начала дня. Шорт — зеркально: монета упала на порог → шорт на середине EMA, стоп за хаем дня, тейк на лое дня."))
@@ -830,7 +834,7 @@ class App(tk.Tk):
                       mid_liq_on=self.v_mliq_on.get(), mid_minv_on=self.v_mminv_on.get(),
                       mid_vol_on=self.v_mvol_on.get(), mid_vol=self._num(self.v_mvol.get(), 5),
                       mid_tfs=[k for k, v in self.v_mtfs.items() if v.get()] or [60],
-                      mid_ref={v: k for k, v in self.MREF.items()}.get(self.v_mref.get(), "7"), mid_multi=self.v_mmulti.get(), mid_allday=self.v_mallday.get(), mid_modes=[k for k, _ in rc.MID_MODES if self.v_mmodes[k].get()] or ["long"],
+                      mid_ref={v: k for k, v in self.MREF.items()}.get(self.v_mref.get(), "7"), mid_multi=self.v_mmulti.get(), mid_allday=self.v_mallday.get(), mid_swing_stop=self.v_mswing.get(), mid_modes=[k for k, _ in rc.MID_MODES if self.v_mmodes[k].get()] or ["long"],
                       mid_carry={v: k for k, v in self.MCARRY.items()}.get(self.v_mcarry.get(), "none"),
                       mid_take_mode={v: k for k, v in self.MTAKE.items()}.get(self.v_mtake.get(), "all"),
                       mid_take_part=mtpart, mid_trail=mtrail,
@@ -1650,7 +1654,7 @@ class App(tk.Tk):
                    "direction", "leverage", "spike_half", "spike_trail", "spike_max", "spike_share", "two_takes", "tg_chat", "tg_form",
                    "tg_trades", "tg_imp", "tg_trend", "trend_on", "trend_trade", "tier_profile", "entry_window", "exit_late",
                    "carry_all", "day_carry", "day_exit", "day_mode", "day_tp", "day_tp_half", "day_trail", "day_act", "idx_form", "ema10_touch", "first_form", "trade_5m", "ema200", "ema200_tfs", "idx_day", "idx_flip", "idx_ref", "entry_from", "day_ref", "trade_weekends", "auto_journal",
-                   "mid_thr", "mid_from", "mid_to", "mid_exit", "mid_tf", "mid_tfs", "mid_idx", "mid_share", "mid_ref", "mid_multi", "mid_allday", "mid_take_mode", "mid_take_part", "mid_trail", "mid_carry", "mid_carry_days", "mid_dir", "mid_modes", "mid_liq", "mid_min_turn", "mid_liq_on", "mid_minv_on", "mid_vol_on", "mid_vol"]
+                   "mid_thr", "mid_from", "mid_to", "mid_exit", "mid_tf", "mid_tfs", "mid_idx", "mid_share", "mid_ref", "mid_multi", "mid_allday", "mid_swing_stop", "mid_take_mode", "mid_take_part", "mid_trail", "mid_carry", "mid_carry_days", "mid_dir", "mid_modes", "mid_liq", "mid_min_turn", "mid_liq_on", "mid_minv_on", "mid_vol_on", "mid_vol"]
 
     def _settings_from_server(self, srv):
         """В режиме пульта вкладка «Настройки» показывает настройки робота на сервере (они и действуют)."""
@@ -1678,7 +1682,7 @@ class App(tk.Tk):
         self.v_mvol_on.set(bool(s.get("mid_vol_on", False))); self.v_mvol.set(f"{float(s.get('mid_vol', 5)):g}")
         for k, v in self.v_mtfs.items():
             v.set(k in [int(x) for x in (s.get("mid_tfs") or [s.get("mid_tf", 60) or 60])])
-        self.v_mmulti.set(bool(s.get("mid_multi", True))); self.v_mallday.set(bool(s.get("mid_allday", True)))
+        self.v_mmulti.set(bool(s.get("mid_multi", True))); self.v_mallday.set(bool(s.get("mid_allday", True))); self.v_mswing.set(bool(s.get("mid_swing_stop", True)))
         for k, v in self.v_mmodes.items():
             v.set(k in rc.mid_modes(s))
         self.v_mtake.set(self.MTAKE.get(s.get("mid_take_mode", "all"), self.MTAKE["all"]))

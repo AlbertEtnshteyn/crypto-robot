@@ -735,6 +735,7 @@ function renderSettings(s) {
     ${inp("mid_to", "Покупки до (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="02:00"')}
     ${inp("mid_exit", "Выход в (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="02:50"')}
     ${chk("mid_multi", "Несколько покупок по монете за день", "После закрытия позиции — снова, когда цена отойдёт выше середины и вернётся к ней. На истории хуже одной покупки.")}
+    ${chk("mid_swing_stop", "2-й и следующие входы — стоп за лоем предыдущего движения", "Повторный вход по монете: стоп за минимумом цены (для шорта — максимумом) с прошлого входа, а не за лоем дня. Если он ближе 0,3% к цене — стоп за лоем дня.")}
     ${sel("mid_take_mode", "Тейк на хае дня (для шорта — на лое)", [["all", "закрыть всю позицию"], ["half", "закрыть часть → стоп в безубыток → трейлинг-стоп"]])}
     ${inp("mid_take_part", "Какую часть закрыть на тейке, %", "number", 'step="5" inputmode="decimal"')}
     ${inp("mid_trail", "Трейлинг-стоп остатка, % от лучшей цены", "number", 'step="0.1" inputmode="decimal"')}
@@ -796,7 +797,7 @@ $("#setForm").addEventListener("submit", async (e) => {
     mid_thr: parseFloat(String(v("mid_thr")).replace(",", ".")) || 2.5, mid_tfs: [5, 15, 60, 1440].filter((k) => c("mtf_" + k)),
     mid_from: (v("mid_from") || "04:00").trim(), mid_to: (v("mid_to") || "02:00").trim(), mid_exit: (v("mid_exit") || "02:50").trim(),
     mid_share: parseFloat(String(v("mid_share")).replace(",", ".")) || 10,
-    mid_liq: parseFloat(v("mid_liq")) || 1, mid_min_turn: parseFloat(v("mid_min_turn")) || 20, mid_liq_on: c("mid_liq_on"), mid_allday: c("mid_allday"), mid_minv_on: c("mid_minv_on"), mid_vol_on: c("mid_vol_on"), mid_vol: parseFloat(v("mid_vol")) || 5, mid_multi: c("mid_multi"), mid_carry: v("mid_carry") || "none", mid_take_mode: v("mid_take_mode") || "all",
+    mid_liq: parseFloat(v("mid_liq")) || 1, mid_min_turn: parseFloat(v("mid_min_turn")) || 20, mid_liq_on: c("mid_liq_on"), mid_allday: c("mid_allday"), mid_swing_stop: c("mid_swing_stop"), mid_minv_on: c("mid_minv_on"), mid_vol_on: c("mid_vol_on"), mid_vol: parseFloat(v("mid_vol")) || 5, mid_multi: c("mid_multi"), mid_carry: v("mid_carry") || "none", mid_take_mode: v("mid_take_mode") || "all",
     mid_take_part: Math.min(95, Math.max(5, parseFloat(v("mid_take_part")) || 50)), mid_trail: Math.min(50, Math.max(0.1, parseFloat(v("mid_trail")) || 1)), mid_modes: ["idx_long", "idx_short", "both", "long", "short"].filter((k) => c("mm_" + k)), mid_carry_days: parseInt(v("mid_carry_days")) || 0,
     tg_chat: (v("tg_chat") || "").trim(), tg_form: c("tg_form"), tg_trend: c("tg_trend"), tg_trades: c("tg_trades"), tg_imp: c("tg_imp"),
   };

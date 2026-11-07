@@ -43,6 +43,7 @@ def rc_modes_text(modes):
 
 
 MID_STOP_BUF = 0.001          # стоп «Движения дня» — на 0,1% ниже лоя дня
+MID_MIN_STOP = 0.003          # повторный вход: стоп за лоем предыдущего движения не ближе 0,3% к цене, иначе — за лоем дня
 STOP_POLL = 15                # проверка стопов и тейков, секунд
 SCAN_EVERY = 60               # пересчёт рынка и поиск всплесков, секунд
 MAX_POS_RESCAN = 8            # при добивке новых сигналов 15:00: доля капитала на сделку = 1/8
@@ -931,6 +932,18 @@ class AutoTrader:
         self._mid_cache[(tk, tf)] = (now, lv)
         return lv
 
+    def _swing_level(self, tk, now, prev_iso, side):
+        """Лой (для шорта — хай) предыдущего движения: экстремум закрытых 5-мин свечей от прошлого входа по монете до сейчас."""
+        try:
+            t0 = datetime.fromisoformat(prev_iso)
+        except (TypeError, ValueError):
+            return None
+        naive = now.replace(tzinfo=None)
+        bars = [b for b in self._bars5(tk, now) if b["t"] >= t0 and b["t"] + timedelta(minutes=5) <= naive]
+        if not bars:
+            return None
+        return min(b["l"] for b in bars) if side > 0 else max(b["h"] for b in bars)
+
     def _liq(self, tk, now):
         """Средний дневной оборот монеты, USDT, за прошлые дни из загруженной истории 5 мин (раз в день)."""
         c = getattr(self, "_liq_cache", {})
@@ -1012,6 +1025,15 @@ class AutoTrader:
                 stop, take = lo * (1 - MID_STOP_BUF), hi
             else:
                 stop, take = hi * (1 + MID_STOP_BUF), lo
+            stop_n = "лой дня" if side > 0 else "хай дня"
+            prev = self.st.setdefault("mid_last", {}).get(tk)
+            if m.get("multi") and m.get("swing_stop") and prev:
+                sw = self._swing_level(tk, now, prev, side)
+                if sw and (px - sw) * side > 0 and abs(px / sw - 1) >= MID_MIN_STOP:
+                    stop = sw * (1 - side * MID_STOP_BUF)
+                    stop_n = "лой предыдущего движения" if side > 0 else "хай предыдущего движения"
+                elif sw:
+                    self.log(f"«Движение дня»: {tk} — {('лой' if side > 0 else 'хай')} предыдущего движения {sw:.6g} ближе {MID_MIN_STOP * 100:g}% к цене — стоп оставляю за {('лоем' if side > 0 else 'хаем')} дня.")
             what = "ПОКУПКА" if side > 0 else "ШОРТ"
             if not ((px - stop) * side > 0 and (take - px) * side > 0):
                 self.log(f"«Движение дня»: {tk} дошла до середины EMA ({px:.4g}), но цена уже "
@@ -1050,9 +1072,10 @@ class AutoTrader:
                 alloc = liq * m["liq"]
             n = sum(1 for x in self.st["traded"] if x == tk) + 1
             self.st["traded"].append(tk)
+            self.st["mid_last"][tk] = now.replace(tzinfo=None).isoformat(timespec="minutes")
             lo_n, hi_n = ("лой", "хай") if side > 0 else ("хай", "лой")
             self.log(f"«Движение дня»: {tk} дошла до середины EMA10/EMA20 на {self._tf_name(tf)} ({mid:.4g}), цена {px:.4g} — {what}"
-                     + (f" №{n} за день" if n > 1 else "") + " (на " + f"{alloc:,.0f}".replace(",", " ") + " USDT" + (f", плечо ×{lev:g}" if lev != 1 else "") + ")" + f", стоп {stop:.4g} ({lo_n} дня), "
+                     + (f" №{n} за день" if n > 1 else "") + " (на " + f"{alloc:,.0f}".replace(",", " ") + " USDT" + (f", плечо ×{lev:g}" if lev != 1 else "") + ")" + f", стоп {stop:.4g} ({stop_n}), "
                      f"тейк {take:.4g} ({hi_n} дня), выход {hm(m['exit'])}.")
             self._open(tk, side, alloc, strat="mid", stop_level=stop, t1=take, exit_min=m["exit"], tf=tf)
 
