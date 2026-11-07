@@ -795,7 +795,8 @@ class AutoTrader:
         m = self._mid()
         self.log(f"Робот запущен ({'ТОРГОВЛЯ' if self.trade else 'НАБЛЮДЕНИЕ'}). Стратегия одна — «Движение дня»: "
                  f"монета выросла на {m['thr'] * 100:g}% от начала дня (03:00 МСК) → покупка, как только цена дошла до середины между EMA10 и EMA20 "
-                 f"({', '.join(self._tf_name(x) for x in m['tfs'])}); стоп за лоем дня, тейк на хае дня. " + ("Покупки круглосуточно" if m.get("allday") else f"Покупки {hm(m['from'])}–{hm(m['to'])}") + f", выход {hm(m['exit'])}"
+                 f"({', '.join(self._tf_name(x) for x in m['tfs'])}); стоп за лоем дня, тейк на хае дня"
+                 + (f" — {m['half'] * 100:.0f}%, затем стоп в безубыток и трейлинг {m['trail'] * 100:g}%" if m.get("half") else "") + ". " + ("Покупки круглосуточно" if m.get("allday") else f"Покупки {hm(m['from'])}–{hm(m['to'])}") + f", выход {hm(m['exit'])}"
                   + f", на сделку {m['share'] * 100:g}% счёта" + ((" × максимальное плечо монеты на бирже" if str(self.sp.get('leverage')) == "auto" else f" × плечо {self.sp.get('leverage')}") if str(self.sp.get('leverage', '1')) not in ("1", "") else "") + ". "
                  + "Режим: " + rc_modes_text(m["modes"]) + ".")
         if self.positions:
@@ -1599,6 +1600,10 @@ class AutoTrader:
                "exit_min": exit_min or (self._day_exit() if strat == "15" else sc.EXIT_MIN), "time": sc.msk(self.clock()).strftime("%H:%M:%S"), "carry": carry, "carry_max": carry_max,
                "date": self.clock().date().isoformat(), "tf": tf or (5 if strat in ("15", "manual") else 15)}
         pos.update(day_ex)
+        if strat == "mid":
+            mm = self._mid()
+            if mm.get("half"):                        # тейк на хае дня — часть, затем б/у и трейлинг-стоп
+                pos.update(mhalf=mm["half"], mtrail=mm.get("trail", 0.01))
         if day_ex.get("dtp"):                         # уровень тейка «движения дня» — для таблиц и графика
             pos["take"] = entry * (1 + side * day_ex["dtp"])
         now_t = self.clock()
@@ -1646,7 +1651,9 @@ class AutoTrader:
                 continue
             s = p["side"]
             if p.get("strat") == "mid":
-                if (px - p["stop"]) * s <= 0:
+                if p.get("mhalf"):
+                    self._mid_half_exits(p, px, s)
+                elif (px - p["stop"]) * s <= 0:
                     self._close(p, px, "стоп (лой дня)" if s > 0 else "стоп (хай дня)")
                 elif p.get("take") and (px - p["take"]) * s >= 0:
                     self._close(p, px, "тейк (хай дня)" if s > 0 else "тейк (лой дня)")
@@ -1688,6 +1695,42 @@ class AutoTrader:
                     self.log(f"  {p['ticker']}: тейк2 взят, остаток {p['lots']} лот. ведёт трейлинг-стоп")
         if not live or changed:
             self._push()
+
+    def _mid_half_exits(self, p, px, s):
+        """«Движение дня», тейк частями: на хае дня (для шорта — на лое) закрыть mhalf позиции, стоп сразу в безубыток,
+        остаток ведёт трейлинг-стоп на mtrail от лучшей цены после тейка (до стопа, трейлинга или выхода по времени)."""
+        e = p["entry"]
+        if p.get("dtook"):
+            if (px - p.get("best", px)) * s > 0:
+                p["best"] = px
+            ts = p.get("best", px) * (1 - s * p.get("mtrail", 0.01))
+            if (ts - p["stop"]) * s > 0:
+                p["stop"] = ts
+                self._save()
+        if (px - p["stop"]) * s <= 0:
+            if not p.get("dtook"):
+                why = "стоп (лой дня)" if s > 0 else "стоп (хай дня)"
+            else:
+                why = "б/у" if abs(p["stop"] - e) < 1e-12 else "трейлинг-стоп"
+            self._close(p, px, why)
+            return
+        if not p.get("dtook") and p.get("take") and (px - p["take"]) * s >= 0:
+            half = p["mhalf"]
+            part = int(p["lots"] * half)
+            name = "хай дня" if s > 0 else "лой дня"
+            if part < 1 or part >= p["lots"]:
+                self._close(p, px, f"тейк ({name})")
+                return
+            if self._close(p, px, f"тейк {half * 100:.0f}% ({name})", lots=part):
+                p.update(dtook=True, armed=True, stage=2, best=px)
+                if (e - p["stop"]) * s > 0:
+                    p["stop"] = e
+                ts = px * (1 - s * p.get("mtrail", 0.01))
+                if (ts - p["stop"]) * s > 0:
+                    p["stop"] = ts
+                self.log(f"  {p['ticker']}: стоп в безубыток {e:.6g}, остаток {p['lots'] * (p.get('per_lot') or 1):.8g} ведёт трейлинг-стоп "
+                         f"{p.get('mtrail', 0.01) * 100:g}% от лучшей цены")
+                self._save()
 
     def _day_exits(self, p, px, s):
         """«Движение дня»: тейк (весь или часть + стоп в б/у) и трейлинг-стоп в % от цены; стоп 3% — как раньше."""

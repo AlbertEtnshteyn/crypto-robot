@@ -589,6 +589,10 @@ class App(tk.Tk):
         self.v_mmodes = {k: tk.BooleanVar(value=k in _mm) for k, _ in rc.MID_MODES}
         self.MCARRY = {"none": "закрыть все позиции", "all": "переносить все (до стопа или тейка)", "profit": "переносить только позиции в плюсе"}
         self.v_mcarry = tk.StringVar(value=self.MCARRY.get(self.s.get("mid_carry", "none"), self.MCARRY["none"]))
+        self.MTAKE = {"all": "закрыть всю позицию", "half": "закрыть часть → стоп в безубыток → трейлинг-стоп"}
+        self.v_mtake = tk.StringVar(value=self.MTAKE.get(self.s.get("mid_take_mode", "all"), self.MTAKE["all"]))
+        self.v_mtpart = tk.StringVar(value=f"{float(self.s.get('mid_take_part', 50) or 50):g}")
+        self.v_mtrail = tk.StringVar(value=f"{float(self.s.get('mid_trail', 1.0) or 1.0):g}")
         self.v_mcdays = tk.StringVar(value=str(int(self.s.get("mid_carry_days", 0) or 0)))
         ent = lambda var, w: (lambda fr: ttk.Entry(fr, textvariable=var, width=w))
         b2 = box("Стратегия «Движение дня» — покупка на середине между EMA10 и EMA20")
@@ -603,6 +607,10 @@ class App(tk.Tk):
         row(b2, ck("Покупки круглосуточно", self.v_mallday), "   иначе покупки с", ent(self.v_mfrom, 6), "до", ent(self.v_mto, 6),
             "   выход в", ent(self.v_mexit, 6),
             ("hint", "время по Москве, ЧЧ:ММ; торговый день — с 03:00 до 03:00 МСК. Вошли после времени выхода — выход на следующий день"))
+        row(b2, "Тейк на хае дня:", cb(self.v_mtake, list(self.MTAKE.values()), 44), "часть, %:", ent(self.v_mtpart, 4),
+            "трейлинг, % от лучшей цены:", ent(self.v_mtrail, 4))
+        row(b2, ("hint", "для шорта — на лое дня. После тейка части стоп сразу в цену входа, затем подтягивается за ценой "
+                         "на заданный % от лучшей цены; остаток закрывается по трейлингу, стопу или по времени"))
         row(b2, "Во время выхода:", cb(self.v_mcarry, list(self.MCARRY.values()), 36), "не дольше, дней:", ent(self.v_mcdays, 4),
             ("hint", "0 — без ограничения; стоп и тейк остаются; у каждой позиции можно выбрать вручную (правая кнопка)"))
         row(b2, "На сделку, % счёта:", ent(self.v_mshare, 5), cb(self.v_lev, list(LEV.values()), 22),
@@ -797,6 +805,13 @@ class App(tk.Tk):
         self.s.update(exchange=ex, mode=mode)
         self._key_hints()
         try:
+            mtpart = float(self.v_mtpart.get().replace(",", "."))
+            mtrail = float(self.v_mtrail.get().replace(",", "."))
+            assert 5 <= mtpart <= 95 and 0.1 <= mtrail <= 50
+        except (ValueError, AssertionError):
+            messagebox.showerror(APP_TITLE, "Тейк частями: часть — от 5 до 95%, трейлинг — от 0,1 до 50%.")
+            return
+        try:
             mthr = float(self.v_mthr.get().replace(",", ".")); mshare = float(self.v_mshare.get().replace(",", "."))
             assert 0 < mthr < 50 and 0 < mshare <= 100
         except (ValueError, AssertionError):
@@ -817,6 +832,8 @@ class App(tk.Tk):
                       mid_tfs=[k for k, v in self.v_mtfs.items() if v.get()] or [60],
                       mid_ref={v: k for k, v in self.MREF.items()}.get(self.v_mref.get(), "7"), mid_multi=self.v_mmulti.get(), mid_allday=self.v_mallday.get(), mid_modes=[k for k, _ in rc.MID_MODES if self.v_mmodes[k].get()] or ["long"],
                       mid_carry={v: k for k, v in self.MCARRY.items()}.get(self.v_mcarry.get(), "none"),
+                      mid_take_mode={v: k for k, v in self.MTAKE.items()}.get(self.v_mtake.get(), "all"),
+                      mid_take_part=mtpart, mid_trail=mtrail,
                       mid_carry_days=int(self.v_mcdays.get()) if self.v_mcdays.get().strip().isdigit() else 0, **times)
         self.s.update(threshold=float(self.v_thr.get()), entry=self.v_entry.get(), capital=cap,
                       auto_signals=self.v_as.get(), auto_journal=self.v_aj.get(),
@@ -1633,7 +1650,7 @@ class App(tk.Tk):
                    "direction", "leverage", "spike_half", "spike_trail", "spike_max", "spike_share", "two_takes", "tg_chat", "tg_form",
                    "tg_trades", "tg_imp", "tg_trend", "trend_on", "trend_trade", "tier_profile", "entry_window", "exit_late",
                    "carry_all", "day_carry", "day_exit", "day_mode", "day_tp", "day_tp_half", "day_trail", "day_act", "idx_form", "ema10_touch", "first_form", "trade_5m", "ema200", "ema200_tfs", "idx_day", "idx_flip", "idx_ref", "entry_from", "day_ref", "trade_weekends", "auto_journal",
-                   "mid_thr", "mid_from", "mid_to", "mid_exit", "mid_tf", "mid_tfs", "mid_idx", "mid_share", "mid_ref", "mid_multi", "mid_allday", "mid_carry", "mid_carry_days", "mid_dir", "mid_modes", "mid_liq", "mid_min_turn", "mid_liq_on", "mid_minv_on", "mid_vol_on", "mid_vol"]
+                   "mid_thr", "mid_from", "mid_to", "mid_exit", "mid_tf", "mid_tfs", "mid_idx", "mid_share", "mid_ref", "mid_multi", "mid_allday", "mid_take_mode", "mid_take_part", "mid_trail", "mid_carry", "mid_carry_days", "mid_dir", "mid_modes", "mid_liq", "mid_min_turn", "mid_liq_on", "mid_minv_on", "mid_vol_on", "mid_vol"]
 
     def _settings_from_server(self, srv):
         """В режиме пульта вкладка «Настройки» показывает настройки робота на сервере (они и действуют)."""
@@ -1664,6 +1681,8 @@ class App(tk.Tk):
         self.v_mmulti.set(bool(s.get("mid_multi", True))); self.v_mallday.set(bool(s.get("mid_allday", True)))
         for k, v in self.v_mmodes.items():
             v.set(k in rc.mid_modes(s))
+        self.v_mtake.set(self.MTAKE.get(s.get("mid_take_mode", "all"), self.MTAKE["all"]))
+        self.v_mtpart.set(f"{float(s.get('mid_take_part', 50) or 50):g}"); self.v_mtrail.set(f"{float(s.get('mid_trail', 1.0) or 1.0):g}")
         self.v_mcarry.set(self.MCARRY.get(s.get("mid_carry", "none"), self.MCARRY["none"])); self.v_mcdays.set(str(int(s.get("mid_carry_days", 0) or 0)))
         self.v_midx.set(bool(s.get("mid_idx", False)))
         self.v_mfrom.set(str(s.get("mid_from", "04:00"))); self.v_mto.set(str(s.get("mid_to", "02:00"))); self.v_mexit.set(str(s.get("mid_exit", "02:50")))

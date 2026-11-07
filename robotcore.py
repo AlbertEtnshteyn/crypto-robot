@@ -23,7 +23,7 @@ DEFAULTS = {"threshold": 2.0, "entry": "15:00", "capital": 10_000,
             "bybit_demo_key": "", "bybit_demo_secret": "", "bybit_real_key": "", "bybit_real_secret": "",
             "binance_demo_key": "", "binance_demo_secret": "", "binance_real_key": "", "binance_real_secret": "",
             # «Движение дня»: время — по Москве (день начинается в 03:00 МСК = 00:00 UTC); суммы — в USDT
-            "mid_allday": True, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5}
+            "mid_allday": True, "mid_take_mode": "all", "mid_take_part": 50, "mid_trail": 1.0, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5}
 SECRET_KEYS = [k for k in DEFAULTS if k.endswith("_key") or k.endswith("_secret")]
 
 CHART_DEPTH = {1: 2, 5: 10, 15: 30, 60: 90, 1440: 400}       # сколько дней истории грузить на график
@@ -114,6 +114,10 @@ def mid_cfg(s):
             "from": 0 if s.get("mid_allday", True) else u(s.get("mid_from", "04:00"), 240),
             "to": 1440 if s.get("mid_allday", True) else (u(s.get("mid_to", "02:00"), 120) or 1440),
             "allday": bool(s.get("mid_allday", True)),
+            # тейк на хае дня: «all» — закрыть всё; «half» — закрыть часть, стоп в безубыток, остаток ведёт трейлинг-стоп
+            "half": (min(0.95, max(0.05, float(s.get("mid_take_part", 50) or 50) / 100))
+                     if s.get("mid_take_mode") == "half" else 0.0),
+            "trail": max(0.001, float(s.get("mid_trail", 1.0) or 1.0) / 100),
             "exit": u(s.get("mid_exit", "02:50"), 170), "tfs": sorted(set(tfs), reverse=True),
             "idx": False, "share": float(s.get("mid_share", 10) or 10) / 100,
             "ref": 0, "multi": bool(s.get("mid_multi", True)),
@@ -692,6 +696,8 @@ def bt_run(data, m, imoex=None):
                 hit_stop = lambda k_: (rows[k_][3] <= stop) if sd > 0 else (rows[k_][2] >= stop)
                 hit_take = lambda k_: (rows[k_][2] >= take) if sd > 0 else (rows[k_][3] <= take)
                 res, why, xr = None, "", r
+                half, trl = m.get("half", 0.0), m.get("trail", 0.01)
+                took, part_res, best = False, 0.0, px
                 if hit_stop(r):
                     res, why = ret(stop), "стоп"
                 else:
@@ -702,24 +708,38 @@ def bt_run(data, m, imoex=None):
                         if kd > ex_day or (kd == ex_day and tk_t.hour * 60 + tk_t.minute >= ex):
                             last_c = rows[k - 1][4]
                             held = ex_day - (di if tm[r - a] < ex else di + 1)       # сколько раз уже переносили
-                            if m.get("carry", "none") != "none" and (m["carry"] == "all" or ret(last_c) > 0) \
+                            if m.get("carry", "none") != "none" and (m["carry"] == "all" or took or ret(last_c) > 0) \
                                     and (not m.get("carry_days") or held < m["carry_days"]) and k < len(rows) - 1:
                                 ex_day += 1                                        # перенос на следующий день
                             else:
                                 res, why, xr = ret(last_c), "время" if held == 0 else f"время (+{held} дн.)", k - 1
+                                if took:
+                                    res, why = part_res + (1 - half) * res, f"тейк {half * 100:.0f}% + " + why
                                 break
                         if hit_stop(k):
                             fill = min(rows[k][1], stop) if sd > 0 else max(rows[k][1], stop)
                             res, why, xr = ret(fill), "стоп", k
+                            if took:
+                                res = part_res + (1 - half) * res
+                                why = f"тейк {half * 100:.0f}% + " + ("б/у" if abs(stop - px) < 1e-12 else "трейлинг")
                             break
-                        if hit_take(k):
+                        if not took and hit_take(k):
                             fill = max(rows[k][1], take) if sd > 0 else min(rows[k][1], take)
-                            res, why, xr = ret(fill), "тейк", k
-                            break
+                            if not half:
+                                res, why, xr = ret(fill), "тейк", k
+                                break
+                            took, part_res, stop, best = True, half * ret(fill), px, fill   # часть закрыта, стоп в безубыток
+                        if took:                                   # трейлинг-стоп от лучшей цены (после проверки стопа на этой свече)
+                            best = max(best, rows[k][2]) if sd > 0 else min(best, rows[k][3])
+                            ts = best * (1 - sd * trl)
+                            if (ts - stop) * sd > 0:
+                                stop = ts
                         k += 1
                     if res is None:
                         res, why, xr = ret(rows[-1][4]), "конец данных", len(rows) - 1
-                xp = px * (1 + sd * res)
+                        if took:
+                            res = part_res + (1 - half) * res
+                xp = px * (1 + sd * res)                         # средняя цена выхода (с учётом частичного тейка)
                 busy = xr
                 trades.append({"date": t.strftime("%Y-%m-%d"), "time": t.strftime("%H:%M"), "ticker": tk, "tf": tf, "side": sd,
                                "liq": round(liq), "cap": round(liq * m["liq"]) if m.get("liq") and liq else None,
