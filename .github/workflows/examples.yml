@@ -2,6 +2,10 @@ name: Примеры сделок на истории
 
 on:
   workflow_dispatch:
+    inputs:
+      args:
+        description: "дней, ТФ, трейлинги %"
+        default: "90 5,15,60 0.5,1,1.5,2,3,5"
 
 permissions:
   contents: write
@@ -9,13 +13,14 @@ permissions:
 jobs:
   examples:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt matplotlib
-      - run: python tools/examples.py 90
+      - run: python tools/examples.py ${{ inputs.args }}
       - name: Картинки в релиз «examples»
         env:
           GH_TOKEN: ${{ github.token }}

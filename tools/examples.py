@@ -25,7 +25,9 @@ for tk in TK:
         print(tk, "нет истории", e); continue
     if rows:
         data[tk] = rows
-VARS = [(tf, tr) for tf in (5, 15, 60) for tr in (0.005, 0.01, 0.015, 0.02, 0.03, 0.05)]
+TFS = [int(x) for x in (sys.argv[2] if len(sys.argv) > 2 else "5,15,60").split(",")]
+TRS = [float(x) / 100 for x in (sys.argv[3] if len(sys.argv) > 3 else "0.5,1,1.5,2,3,5").split(",")]
+VARS = [(tf, tr) for tf in TFS for tr in TRS]
 SMN = {"24h": "стоп за лоем 24 ч", "trend": "стоп за лоем с начала тренда", "1h": "стоп за лоем последнего часа"}
 res = {}
 for tf, mode in VARS:
@@ -37,18 +39,22 @@ for tf, mode in VARS:
     pos = sum(t["pct"] for t in tr if t["pct"] > 0); neg = -sum(t["pct"] for t in tr if t["pct"] < 0)
     res[(tf, mode)] = tr
     import statistics as _st
-    mdd = min((sum(t["pct"] for t in tr[:k + 1]) for k in range(len(tr))), default=0)
+    tr.sort(key=lambda t: (t["date"], t["time"]))
+    eq, peak, mdd = 0.0, 0.0, 0.0
+    for t in tr:
+        eq += t["pct"]; peak = max(peak, eq); mdd = min(mdd, eq - peak)
     stp = _st.median([abs(t["entry"] / t.get("stop0", t["stop"]) - 1) * 100 for t in tr]) if tr else 0
     months = {}
     for t in tr:
         months[t["date"][:7]] = months.get(t["date"][:7], 0) + t["pct"]
     print(f"ВАРИАНТ ТФ {tf} мин, стоп под лоем предыдущего отката, +1% → б/у, трейлинг {mode * 100:g}%: сделок {len(tr)}, стоп обычно {stp:.2f}%, "
-          f"по месяцам {', '.join(f'{k} {v:+.0f}%' for k, v in sorted(months.items()))}, "
+          f"по месяцам {', '.join(f'{k} {v:+.0f}%' for k, v in sorted(months.items()))}, месяцев в плюсе {sum(1 for v in months.values() if v > 0)} из {len(months)}, "
+          f"худшая просадка {mdd:.0f}%, "
           f"в плюсе {sum(1 for t in tr if t['pct'] > 0) / max(1, len(tr)) * 100:.0f}%, средняя {sum(t['pct'] for t in tr) / max(1, len(tr)):+.3f}%, "
           f"сумма {sum(t['pct'] for t in tr):+.1f}%, профит-фактор {pos / neg if neg else 0:.2f}", flush=True)
 for k in res:
     res[k].sort(key=lambda t: (t["date"], t["time"]))
-for tf_ in (5, 15, 60):
+for tf_ in TFS:
     b_ = max((k for k in res if k[0] == tf_), key=lambda k: sum(t["pct"] for t in res[k]))
     print(f"ЛУЧШИЙ ТРЕЙЛИНГ ТФ {tf_} мин: {b_[1] * 100:g}% — сумма {sum(t['pct'] for t in res[b_]):+.1f}%", flush=True)
 best = max(res, key=lambda k: sum(t["pct"] for t in res[k]))
