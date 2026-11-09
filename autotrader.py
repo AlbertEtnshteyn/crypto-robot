@@ -797,12 +797,10 @@ class AutoTrader:
                 lv = [(tf, mv_.get(f"{tk}|{tf}")) for tf in m["tfs"]]
                 lv = [f"{self._tf_name(tf)} {x:.4g}" + (f" ({(x / px - 1) * 100:+.1f}%)" if px else "") for tf, x in lv if x]
                 n = sum(1 for x in self.st.get("traded", []) if x == tk)
-                txt = (("СЛЕЖУ (шорт) с " if self.st.get("mid_side", {}).get(tk) == -1 else "СЛЕЖУ с ") + q[tk] + (" · покупок " + str(n) if n else "") + " · середина EMA: " + (", ".join(lv) or "считаю")
-                       if t < m["to"] else "входы на сегодня закончены")
-            elif why == "СИГНАЛ":
-                txt = f"порог есть — входы с {hm(m['from'])}" if t < m["from"] else "порог есть"
+                txt = (("ТРЕНД ВНИЗ с " if self.st.get("mid_side", {}).get(tk) == -1 else "ТРЕНД ВВЕРХ с ") + q[tk]
+                       + " · жду первого отката" + (" · входов " + str(n) if n else "") + " · середина EMA: " + (", ".join(lv) or "считаю"))
             else:
-                txt = why
+                txt = "нет тренда или первый откат уже был"
             out.append((tk, mv, txt))
         return out
 
@@ -948,19 +946,68 @@ class AutoTrader:
         if not self.trade:
             self._set_status(f"НАБЛЮДЕНИЕ: {mk}кандидаты дня — для торговли нажмите «Старт»"
                              + (f" · ведёт позиции: {len(self.positions)}" if self.positions else ""))
-        elif t < m["from"]:
-            self._set_status(f"ТОРГОВЛЯ: {mk}входы с {hm(m['from'])}" + (f" · в позициях: {len(self.positions)}" if self.positions else ""))
-        elif t < m["to"]:
-            self._set_status(f"ТОРГОВЛЯ: {mk}жду середины EMA10/EMA20" + (f" — {', '.join(wait[:6])}" if wait else "")
-                             + (f" · в позициях: {len(self.positions)}" if self.positions else ""))
         else:
-            self._set_status(f"ТОРГОВЛЯ: {mk}входы на сегодня закончены" + (f" · в позициях: {len(self.positions)}, выход {hm(m['exit'])}" if self.positions else ""))
+            self._set_status(f"ТОРГОВЛЯ: {mk}жду первого отката к середине EMA10/EMA20 в тренде" + (f" — {', '.join(wait[:6])}" if wait else "")
+                             + (f" · в позициях: {len(self.positions)}" if self.positions else ""))
 
     # ------------------------------------------------------------------ «Движение дня»: покупка на середине EMA10/EMA20
     MID_DEFAULT = {"thr": 0.03, "from": 0, "to": 1380, "exit": 1430, "tfs": [60], "idx": False, "share": 0.10, "ref": 0, "multi": True, "carry": "none", "carry_days": 0, "modes": ["long"], "liq": 0.01, "min_turn": 0, "min_vol": 0}
 
     def _mid(self):
         return dict(self.MID_DEFAULT, **(self.sp.get("mid") or {}))
+
+    def _trend_state(self, tk, now, tf):
+        """Тренд на ТФ по закрытым свечам: (сторона, середина EMA10/EMA20, цена уже уходила за середину, первый откат уже был,
+        начало тренда) или None, если тренда нет. Тренд вверх: EMA10 выше EMA20 и закрытие выше EMA200 и SMA200; вниз — зеркально.
+        Откаты считаются по закрытым 5-мин свечам от начала тренда."""
+        naive = now.replace(tzinfo=None)
+        b = naive.replace(second=0, microsecond=0)
+        if tf < 1440:
+            b -= timedelta(minutes=(b.hour * 60 + b.minute) % tf)
+        else:
+            b = b.replace(hour=0, minute=0)
+        c = self.__dict__.setdefault("_tr_cache", {})
+        if c.get((tk, tf), (None,))[0] != b:
+            days = {5: 3, 15: 5, 60: 12, 1440: 420}.get(tf, 5)
+            rows = [r for r in self.b.ti.candles_range(tk, now - timedelta(days=days), now, tf)
+                    if r["t"] + timedelta(minutes=tf) <= naive]
+            cl = [r["c"] for r in rows]
+            e10, e20, e200 = ema(cl, 10), ema(cl, 20), ema(cl, 200)
+            comp, mids = [], []
+            for k, x in enumerate(cl):
+                sd = 0
+                if k >= 199:
+                    s200 = sum(cl[k - 199:k + 1]) / 200
+                    if e10[k] > e20[k] and x > e200[k] and x > s200:
+                        sd = 1
+                    elif e10[k] < e20[k] and x < e200[k] and x < s200:
+                        sd = -1
+                comp.append(sd)
+                mids.append((e10[k] + e20[k]) / 2)
+            c[(tk, tf)] = (b, (rows, comp, mids))
+        rows, comp, mids = c[(tk, tf)][1]
+        if len(rows) < 200 or not comp[-1]:
+            return None
+        sd, k0 = comp[-1], len(comp) - 1
+        while k0 > 0 and comp[k0 - 1] == sd:
+            k0 -= 1
+        T = rows[k0]["t"] + timedelta(minutes=tf)        # тренд начался на закрытии этой свечи
+        b5 = self._bars5(tk, now)
+        if not b5 or b5[0]["t"] > T:
+            return sd, mids[-1], True, True, T            # тренд старше загруженных 5-мин свечей — первый откат уже был
+        closes = [r["t"] + timedelta(minutes=tf) for r in rows]
+        armed, j = False, k0
+        for x in b5:
+            if x["t"] < T:
+                continue
+            while j + 1 < len(rows) and closes[j + 1] <= x["t"]:
+                j += 1
+            md = mids[j]
+            if armed and ((x["l"] <= md) if sd > 0 else (x["h"] >= md)):
+                return sd, mids[-1], True, True, T
+            if (x["c"] - md) * sd > 0:
+                armed = True
+        return sd, mids[-1], armed, False, T
 
     def _mid_levels(self, tk, now, tf):
         """(середина EMA10/EMA20 по последней закрытой свече ТФ, лой дня, хай дня) — пересчёт не чаще раза в минуту."""
@@ -1021,21 +1068,13 @@ class AutoTrader:
         EMA10/EMA20 и вернулась к ней → вход. Лонг: стоп за лоем дня, тейк на хае; шорт: стоп за хаем, тейк на лое.
         Входов за день по бумаге может быть несколько (настройка), но одна позиция по бумаге за раз."""
         m = self._mid()
-        t = now.hour * 60 + now.minute
-        if not self.trade or not (m["from"] <= t < m["to"]):
+        if not self.trade:                               # входы круглосуточно — как только появился первый откат в тренде
             return
-        q = self.st.setdefault("mid_q", {})
+        q = self.st.setdefault("mid_q", {})              # монеты, которые ждут первого отката (для экрана)
         qs = self.st.setdefault("mid_side", {})
-        arm = self.st.setdefault("mid_arm", {})
+        used = self.st.setdefault("mid_used", {})        # «тикер|ТФ» → начало тренда, первый откат которого уже отработан
         held = {p["ticker"] for p in self.positions}
-        for tk, mv, why in self.scan_rows:
-            if why == "СИГНАЛ" and tk not in q:
-                q[tk] = now.strftime("%H:%M")
-                qs[tk] = 1 if mv > 0 else -1
-                self.log(f"«Движение дня»: {tk} {mv * 100:+.2f}% от начала дня (03:00 МСК) — слежу, "
-                         f"{'покупка' if mv > 0 else 'шорт'} на середине EMA10/EMA20 ({', '.join(self._tf_name(x) for x in m['tfs'])}).")
-                self._save()
-        watch = [tk for tk in q if tk not in held and (m["multi"] or tk not in self.st["traded"])]
+        watch = [tk for tk, mv, why in self.scan_rows if tk not in held and (m["multi"] or tk not in self.st["traded"])]
         if not watch:
             return
         try:
@@ -1046,40 +1085,54 @@ class AutoTrader:
             return
         self.prices.update(lp)
         self.mid_view = getattr(self, "mid_view", {})
-        # свечи для EMA — по всем монетам сразу, в несколько потоков (каждая монета — в своём потоке)
-        _parallel([tk for tk in watch if lp.get(tk)], lambda tk: [self._mid_levels(tk, now, tf) for tf in m["tfs"]])
+        # тренд и середина EMA — по всем монетам сразу, в несколько потоков
+        _parallel([tk for tk in watch if lp.get(tk)],
+                  lambda tk: [(self._trend_state(tk, now, tf), self._mid_levels(tk, now, tf)) for tf in m["tfs"]])
         for tk in watch:
             px = lp.get(tk)
             if not px:
                 continue
-            side = qs.get(tk, 1)
-            hit = None                                   # ТФ, на котором цена дошла до середины EMA (старший из сработавших)
+            hit, side = None, 0
             for tf in m["tfs"]:
                 try:
+                    ts_ = self._trend_state(tk, now, tf)
                     lv = self._mid_levels(tk, now, tf)
                 except sc.CertError:
                     raise
                 except Exception as e:
                     self.log(f"  {tk}: свечи для EMA ({self._tf_name(tf)}) не получены ({e})")
                     continue
-                if not lv:
-                    continue
                 key = f"{tk}|{tf}"
-                self.mid_view[key] = lv[0]
-                if (px - lv[0]) * side > 0:
-                    if not arm.get(key):
-                        arm[key] = True                  # цена за серединой — следующее касание будет входом
-                        self._save()
-                elif arm.get(key) and hit is None:
-                    hit = (tf, lv)
+                if not ts_ or not lv:
+                    continue
+                sd, mid, armed, touched, T0 = ts_
+                T = T0.isoformat(timespec="minutes")
+                self.mid_view[key] = mid
+                if touched or used.get(key) == T:
+                    if q.get(tk) and qs.get(tk) == sd:
+                        q.pop(tk, None)
+                    continue
+                ann = self.st.setdefault("mid_ann", {})
+                if armed:
+                    q[tk], qs[tk] = (T0 + timedelta(minutes=sc.SHIFT)).strftime("%H:%M"), sd
+                if armed and ann.get(key) != T:
+                    ann[key] = T
+                    self.log(f"«Движение дня»: {tk} — тренд {'вверх' if sd > 0 else 'вниз'} на {self._tf_name(tf)} "
+                             f"(EMA10 {'выше' if sd > 0 else 'ниже'} EMA20, цена {'выше' if sd > 0 else 'ниже'} EMA200 и SMA200) — "
+                             f"жду первого отката к середине EMA10/EMA20 ({mid:.4g}).")
+                    self._save()
+                if armed and hit is None and (px - mid) * sd <= 0:
+                    hit, side = (tf, (mid, lv[1], lv[2]), key, T), sd
             if not hit:
                 continue
+            tf, lvv, key, T = hit
+            used[key] = T                                # первый откат этого тренда — следующий вход только в новом тренде
+            q.pop(tk, None)
+            self._save()
+            hit = (tf, lvv)
             if not mid_allowed(m["modes"], side, self.market):
                 continue                                  # режим торговли не разрешает эту сторону при нынешнем индексе
             tf, (mid, lo, hi) = hit
-            for x in m["tfs"]:
-                arm[f"{tk}|{x}"] = False
-            self._save()
             if side > 0:
                 stop, take = lo * (1 - MID_STOP_BUF), hi
             else:
@@ -1125,8 +1178,7 @@ class AutoTrader:
                     if w.get(tk) != now.date():
                         w[tk] = now.date(); self._volw = w
                         self.log(f"«Движение дня»: {tk} — объём торгов сегодня {vol / 1e6:.1f} млн USDT меньше {m['min_vol'] / 1e6:g} млн — пока не вхожу.")
-                    for x in m["tfs"]:
-                        arm[f"{tk}|{x}"] = True           # объём ещё может набраться — следующее касание снова проверим
+                    used.pop(f"{tk}|{tf}", None)         # объём ещё может набраться — следующее касание снова проверим
                     continue
             if m["liq"] and liq and alloc > liq * m["liq"]:
                 self.log(f"  {tk}: средний оборот {liq / 1e6:.1f} млн USDT в день — позиция уменьшена до {m['liq'] * 100:g}% оборота: "

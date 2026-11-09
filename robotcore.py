@@ -636,6 +636,62 @@ def _bt_mids(rows, tf):
     return out
 
 
+def _bt_cross(rows, tf):
+    """Для каждой 5-мин свечи по закрытым свечам ТФ: (середина EMA10/EMA20, сторона тренда +1/−1, номер тренда) или None.
+    Тренд вверх (+1): EMA10 выше EMA20 и закрытие выше EMA200 и SMA200; вниз (−1) — зеркально; иначе тренда нет.
+    Номер растёт каждый раз, когда тренд начинается заново."""
+    a10, a20, a200 = 2 / 11, 2 / 21, 2 / 201
+    e10 = e20 = e200 = None
+    closes = []
+    out = [None] * len(rows)
+    cur_key, cur_close, val, side, cid = None, None, None, 0, 0
+    for i, (t, o, h, l, c, *_) in enumerate(rows):
+        m = t.hour * 60 + t.minute
+        key = t.date() if tf >= 1440 else (t.date(), m // tf)
+        if key != cur_key:
+            if cur_close is not None:
+                x = cur_close
+                closes.append(x)
+                e10 = x if e10 is None else e10 + a10 * (x - e10)
+                e20 = x if e20 is None else e20 + a20 * (x - e20)
+                e200 = x if e200 is None else e200 + a200 * (x - e200)
+                sd = 0
+                if len(closes) >= 200:
+                    s200 = sum(closes[-200:]) / 200
+                    if e10 > e20 and x > e200 and x > s200:
+                        sd = 1
+                    elif e10 < e20 and x < e200 and x < s200:
+                        sd = -1
+                if sd != side:
+                    side = sd
+                    if sd:
+                        cid += 1
+                val = ((e10 + e20) / 2, side, cid) if side else None
+            cur_key = key
+        cur_close = c
+        out[i] = val
+    return out
+
+
+def _bt_first_touch(rows, tf):
+    """5-мин свечи, на которых случился ПЕРВЫЙ откат к середине EMA10/EMA20 после пересечения EMA10 и EMA20:
+    {строка: (середина, сторона)}. Сначала цена должна закрыться за серединой по ходу тренда, затем вернуться к ней."""
+    out, armed, used = {}, set(), set()
+    for i, v in enumerate(_bt_cross(rows, tf)):
+        if v is None:
+            continue
+        md, s_, cid = v
+        if cid in used:
+            continue
+        h, l, c = rows[i][2], rows[i][3], rows[i][4]
+        if cid in armed and ((l <= md) if s_ > 0 else (h >= md)):
+            used.add(cid)
+            out[i] = (md, s_)
+        elif (c - md) * s_ > 0:
+            armed.add(cid)
+    return out
+
+
 def _bt_trend(rows, tf):
     """EMA200 и SMA200 по закрытым свечам ТФ — для каждой 5-мин свечи (как у живого робота). None — мало истории."""
     a, a10, a20 = 2 / 201, 2 / 11, 2 / 21
@@ -669,7 +725,7 @@ def bt_run(data, m, imoex=None):
     for tk, rows in data.items():
         if len(rows) < 100:
             continue
-        mids = {tf: _bt_mids(rows, tf) for tf in m["tfs"]}
+        touch = {tf: _bt_first_touch(rows, tf) for tf in m["tfs"]}   # первые откаты каждого тренда
         trend = {tf: _bt_trend(rows, tf) for tf in m["tfs"]}
         days, start = [], 0
         didx = [0] * len(rows)
@@ -689,50 +745,24 @@ def bt_run(data, m, imoex=None):
             ii = [k for k, x in enumerate(tm) if x >= m["ref"]]
             if not ii or tm[ii[0]] > m["ref"] + 5:
                 continue
-            op = rows[a + ii[0]][1]
             day_from = a                                  # день — с 00:00 UTC (03:00 МСК)
             prev_in = None                                # строка прошлого входа по монете сегодня
-            q, sd = None, 0
-            for r in range(a + ii[0], z):
-                x = tm[r - a]
-                if x < m["from"] - 5:
-                    continue
-                if x >= m["to"]:
-                    break
-                mv = rows[r][4] / op - 1
-                if mv >= m["thr"] and can_l:
-                    q, sd = r, 1
-                    break
-                if mv <= -m["thr"] and can_s:
-                    q, sd = r, -1
-                    break
-            if q is None:
-                continue
-            arm = {tf: (mids[tf][q] is not None and (rows[q][4] - mids[tf][q]) * sd > 0) for tf in m["tfs"]}
-            r = q + 1
-            while r < z and tm[r - a] < m["to"]:
+            # вход — на ПЕРВОМ откате к середине EMA10/EMA20 после пересечения EMA10 и EMA20 (лонг — EMA10 выше, шорт — ниже);
+            # повторные откаты того же тренда пропускаются, порог движения от начала дня не нужен
+            r, sd = a + ii[0], 0
+            while r < z:                                  # входы круглосуточно — время дня не важно
                 t, o, h, l, c = rows[r][:5]
                 hit = None
                 for tf in m["tfs"]:
-                    md = mids[tf][r]
-                    if md is None:
-                        continue
-                    if arm[tf] and hit is None and ((l <= md) if sd > 0 else (h >= md)):
-                        hit = (tf, md)
-                if r <= busy:
-                    r += 1
-                    continue
-                if hit is None or not mid_allowed(m.get("modes", ["long"]), sd, (imoex.get(t) if imoex is not None else None)):
-                    for tf in m["tfs"]:
-                        md = mids[tf][r]
-                        if md is not None and (c - md) * sd > 0:
-                            arm[tf] = True
-                    r += 1
-                    continue
-                tf, md = hit
+                    v = touch[tf].get(r)
+                    if v and hit is None and (can_l if v[1] > 0 else can_s):
+                        hit = (tf, v[0], v[1])
+                if r <= busy or hit is None:
+                    r += 1; continue
+                tf, md, sd = hit
+                if not mid_allowed(m.get("modes", ["long"]), sd, (imoex.get(t) if imoex is not None else None)):
+                    r += 1; continue
                 px = (o if o <= md else md) if sd > 0 else (o if o >= md else md)
-                for x in m["tfs"]:
-                    arm[x] = False
                 if r <= day_from:
                     r += 1; continue
                 if m.get("min_vol") and sum(x[5] if len(x) > 5 else 0 for x in rows[day_from:r]) < m["min_vol"]:
