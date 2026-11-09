@@ -72,7 +72,7 @@ MARKETS = [
 ]
 MARKET_N = {"top20": 20, "top50": 50, "top100": 100, "all": None}
 MID_VOL_MULT = 3.0            # «Движение дня»: всплеск объёма — 5-мин свеча по ходу тренда с оборотом ≥ ×3 медианы за сутки до тренда
-MID_STOP_MODE = "24h"         # стоп «Движения дня»: "24h" — за лоем 24 ч, "trend" — за лоем с начала тренда, "1h" — за лоем последнего часа
+MID_STOP_MODE = "swing"        # стоп «Движения дня»: "24h" — за лоем 24 ч, "trend" — за лоем с начала тренда, "1h" — за лоем последнего часа
 MID_TRAIL_MODE = True         # «Движение дня»: без тейка — после +1% стоп в безубыток, дальше трейлинг-стоп (mid_trail, по умолчанию 1%)
 MID_TRAIL_ACT = 0.01          # с какой прибыли включается безубыток и трейлинг
 MID_RR = 1.5                  # «Движение дня»: тейк минимум в 1,5 раза дальше стопа
@@ -116,6 +116,27 @@ def ema(vals, span=20):
         e = v if e is None else e + k * (v - e)
         out.append(e)
     return out
+
+
+def swing_extreme(hs, ls, k0, side):
+    """Стоп «под лоем предыдущего отката»: по закрытым свечам ТФ (hs, ls) с начала тренда (k0) найти вершину импульса
+    и от неё назад — ближайшее локальное дно (лой ниже соседних свечей). Для шорта — зеркально (хай отката перед падением).
+    Нет дна — экстремум с начала тренда."""
+    n = len(ls)
+    if n == 0:
+        return None
+    k0 = max(0, min(k0, n - 1))
+    if side > 0:
+        top = max(range(k0, n), key=lambda k: hs[k])
+        for k in range(top - 1, max(0, k0 - 30), -1):
+            if 0 < k < n - 1 and ls[k] <= ls[k - 1] and ls[k] <= ls[k + 1]:
+                return ls[k]
+        return min(ls[k0:n])
+    bot = min(range(k0, n), key=lambda k: ls[k])
+    for k in range(bot - 1, max(0, k0 - 30), -1):
+        if 0 < k < n - 1 and hs[k] >= hs[k - 1] and hs[k] >= hs[k + 1]:
+            return hs[k]
+    return max(hs[k0:n])
 
 
 def _median(xs):
@@ -1139,6 +1160,12 @@ class AutoTrader:
                     seg = (d24 if smode == "24h" else [x for x in b5_ if x["t"] >= T0] if smode == "trend"
                            else b5_[-12:]) or b5_[-12:]
                     lo_s = (min([x["l"] for x in seg] or [lv[1]])) if sd > 0 else (max([x["h"] for x in seg] or [lv[2]]))
+                    if smode == "swing":                     # под лоем предыдущего отката (для шорта — над хаем)
+                        rows_ = self._tr_cache[(tk, tf)][1][0]
+                        k0 = next((k for k, r_ in enumerate(rows_) if r_["t"] + timedelta(minutes=tf) >= T0), 0)
+                        sw = swing_extreme([r_["h"] for r_ in rows_], [r_["l"] for r_ in rows_], k0, sd)
+                        if sw:
+                            lo_s = sw
                     lo24 = lo_s if sd > 0 else min([x["l"] for x in d24] or [lv[1]])
                     hi24 = max([x["h"] for x in d24] or [lv[2]]) if sd > 0 else lo_s
                     hit, side = (tf, (mid, lo24, hi24), key, T), sd
@@ -1156,7 +1183,7 @@ class AutoTrader:
                 stop, take = min(lo * (1 - MID_STOP_BUF), px * (1 - MID_MIN_STOP)), hi
             else:
                 stop, take = max(hi * (1 + MID_STOP_BUF), px * (1 + MID_MIN_STOP)), lo
-            stop_n = {"24h": "за 24 ч", "trend": "с начала тренда", "1h": "за последний час"}.get(m.get("stop_mode", MID_STOP_MODE), "за 24 ч")
+            stop_n = {"24h": "за 24 ч", "trend": "с начала тренда", "1h": "за последний час", "swing": "предыдущего отката"}.get(m.get("stop_mode", MID_STOP_MODE), "за 24 ч")
             stop_n = ("лой " if side > 0 else "хай ") + stop_n
             prev = self.st.setdefault("mid_last", {}).get(tk)
             if m.get("multi") and m.get("swing_stop") and prev:

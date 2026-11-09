@@ -210,7 +210,7 @@ function renderState(st) {
   const pairTxt = pr && pr.enabled ? ` Пара серверов: торгует ${pr.active ? "этот" : "второй"} сервер (${pr.active ? "" : pr.peer_host + ", "}этот — ${pr.role === "primary" ? "основной" : "резервный"}); второй ${pr.peer_ok ? "на связи" : "не отвечает с " + pr.peer_last_ok}.` : "";
   const MS = SET || {};
   const tfs = (MS.mid_tfs || [MS.mid_tf || 60]).map((x) => ({ 5: "5м", 15: "15м", 60: "1ч", 1440: "1д" })[x] || x).join(", ");
-  $("#robotHint").textContent = (st.trade ? `«Движение дня» (${(MS.mid_modes || ["long"]).map((k) => ({ idx_long: "BTC вверх — лонг", idx_short: "BTC вниз — шорт", both: "обе стороны", long: "только лонг", short: "только шорт" })[k]).join(", ")}): тренд (${tfs}: EMA10 выше EMA20, цена выше EMA200 и SMA200) + всплеск объёма → вход на первом откате к середине EMA10/EMA20, круглосуточно; стоп ${({ "24h": "за лоем 24 ч", trend: "за лоем с начала тренда", "1h": "за лоем последнего часа" })[MS.mid_stop || "24h"]}, после +${MS.mid_act || 1}% — безубыток и трейлинг ${MS.mid_trail || 1}%, выхода по времени нет. «Стоп» — выключить новые сделки.`
+  $("#robotHint").textContent = (st.trade ? `«Движение дня» (${(MS.mid_modes || ["long"]).map((k) => ({ idx_long: "BTC вверх — лонг", idx_short: "BTC вниз — шорт", both: "обе стороны", long: "только лонг", short: "только шорт" })[k]).join(", ")}): тренд (${tfs}: EMA10 выше EMA20, цена выше EMA200 и SMA200) + всплеск объёма → вход на первом откате к середине EMA10/EMA20, круглосуточно; стоп ${({ swing: "под лоем предыдущего отката", "24h": "за лоем 24 ч", trend: "за лоем с начала тренда", "1h": "за лоем последнего часа" })[MS.mid_stop || "swing"]}, после +${MS.mid_act || 1}% — безубыток и трейлинг ${MS.mid_trail || 1}%, выхода по времени нет. «Стоп» — выключить новые сделки.`
     : st.token_set ? "Робот следит за рынком, но не покупает. «Старт» — включить торговлю."
       : "Введите ключи API биржи во вкладке «Настройки» → «Биржа и счёт».") + pairTxt +
     (st.exchange ? " Счёт: " + st.exchange + (/_real$/.test(st.broker || "") ? " — РЕАЛЬНЫЕ деньги." : ".") : "");
@@ -759,7 +759,7 @@ function renderSettings(s) {
     <div class="f"><span>Чем торговать</span>
       ${(s.markets_all || []).map(([k, t]) => `<label class="c"><input type="checkbox" name="dmk_${k}" ${(s.day_markets || ["top20"]).includes(k) ? "checked" : ""}><span>${esc(t)}</span></label>`).join("")}</div>
     ${inp("mid_vol_mult", "Всплеск объёма: 5-мин свеча по ходу тренда с оборотом ≥ × медианы за сутки", "number", 'step="0.5" inputmode="decimal"')}
-    ${sel("mid_stop", "Стоп (для шорта — за хаем)", [["24h", "за лоем за 24 часа"], ["trend", "за лоем с начала тренда"], ["1h", "за лоем последнего часа"]])}
+    ${sel("mid_stop", "Стоп (для шорта — за хаем)", [["swing", "под лоем предыдущего отката"], ["24h", "за лоем за 24 часа"], ["trend", "за лоем с начала тренда"], ["1h", "за лоем последнего часа"]])}
     <div class="hint" style="margin-left:0">Стоп не ближе 0,3% к цене входа.</div>
     ${inp("mid_act", "Тейка нет. При прибыли, % → стоп в безубыток", "number", 'step="0.1" inputmode="decimal"')}
     ${inp("mid_trail", "…дальше трейлинг-стоп, % от лучшей цены", "number", 'step="0.1" inputmode="decimal"')}
@@ -818,7 +818,7 @@ $("#setForm").addEventListener("submit", async (e) => {
     day_markets: (SET.markets_all || []).map(([k]) => k).filter((k) => c("dmk_" + k)),
     leverage: v("leverage"),
     mid_tfs: [5, 15, 60, 1440].filter((k) => c("mtf_" + k)),
-    mid_stop: v("mid_stop") || "24h", mid_act: Math.max(0.1, parseFloat(String(v("mid_act")).replace(",", ".")) || 1),
+    mid_stop: v("mid_stop") || "swing", mid_act: Math.max(0.1, parseFloat(String(v("mid_act")).replace(",", ".")) || 1),
     mid_vol_mult: Math.max(1, parseFloat(String(v("mid_vol_mult")).replace(",", ".")) || 3),
     mid_share: parseFloat(String(v("mid_share")).replace(",", ".")) || 10,
     mid_liq: parseFloat(v("mid_liq")) || 1, mid_min_turn: parseFloat(v("mid_min_turn")) || 20, mid_liq_on: c("mid_liq_on"), ex_stop: c("ex_stop"), mid_minv_on: c("mid_minv_on"), mid_vol_on: c("mid_vol_on"), mid_vol: parseFloat(v("mid_vol")) || 5, mid_multi: c("mid_multi"),

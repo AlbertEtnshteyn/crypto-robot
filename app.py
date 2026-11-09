@@ -597,9 +597,9 @@ class App(tk.Tk):
         self.v_mtrail = tk.StringVar(value=f"{float(self.s.get('mid_trail', 1.0) or 1.0):g}")
         self.v_mcdays = tk.StringVar(value=str(int(self.s.get("mid_carry_days", 0) or 0)))
         ent = lambda var, w: (lambda fr: ttk.Entry(fr, textvariable=var, width=w))
-        self.MSTOP = {"24h": "за лоем за 24 часа (шорт — за хаем)", "trend": "за лоем с начала тренда (шорт — за хаем)",
+        self.MSTOP = {"swing": "под лоем предыдущего отката (шорт — над хаем)", "24h": "за лоем за 24 часа (шорт — за хаем)", "trend": "за лоем с начала тренда (шорт — за хаем)",
                       "1h": "за лоем последнего часа (шорт — за хаем)"}
-        self.v_mstop = tk.StringVar(value=self.MSTOP.get(self.s.get("mid_stop", "24h"), self.MSTOP["24h"]))
+        self.v_mstop = tk.StringVar(value=self.MSTOP.get(self.s.get("mid_stop", "swing"), self.MSTOP["swing"]))
         self.v_mact = tk.StringVar(value=f"{float(self.s.get('mid_act', 1.0) or 1.0):g}")
         self.v_mvm = tk.StringVar(value=f"{float(self.s.get('mid_vol_mult', 3.0) or 3.0):g}")
         b2 = box("Стратегия «Движение дня» — первый откат в тренде")
@@ -838,7 +838,7 @@ class App(tk.Tk):
                       mid_carry={v: k for k, v in self.MCARRY.items()}.get(self.v_mcarry.get(), "none"),
                       mid_take_mode={v: k for k, v in self.MTAKE.items()}.get(self.v_mtake.get(), "all"),
                       mid_take_part=mtpart, mid_trail=mtrail,
-                      mid_stop={v: k for k, v in self.MSTOP.items()}.get(self.v_mstop.get(), "24h"),
+                      mid_stop={v: k for k, v in self.MSTOP.items()}.get(self.v_mstop.get(), "swing"),
                       mid_act=self._num(self.v_mact.get(), 1.0) or 1.0, mid_vol_mult=max(1.0, self._num(self.v_mvm.get(), 3.0)),
                       mid_carry_days=int(self.v_mcdays.get()) if self.v_mcdays.get().strip().isdigit() else 0, **times)
         self.s.update(threshold=float(self.v_thr.get()), entry=self.v_entry.get(), capital=cap,
@@ -1473,7 +1473,7 @@ class App(tk.Tk):
         self.robot_help.configure(text=(
             f"Стратегия «Движение дня» ({rc.mid_modes_text(m['modes'])}, {at.BROKER_NAMES.get(self._acc_key(), '')}): тренд ({tfs}: EMA10 выше EMA20, цена выше EMA200 и SMA200; "
             f"для шорта наоборот) → всплеск объёма ×{m['vol_mult']:g} → первый откат к середине между EMA10 и EMA20 → вход на {m['share'] * 100:g}% счёта" + ((" × плечо биржи по монете" if str(self.s.get('leverage')) == "auto" else f" × плечо {self.s.get('leverage')}") if str(self.s.get('leverage', '1')) != "1" else "")
-            + f"; стоп {({'24h': 'за лоем за 24 ч', 'trend': 'за лоем с начала тренда', '1h': 'за лоем последнего часа'})[m['stop_mode']]} (для шорта — за хаем), "
+            + f"; стоп {({'24h': 'за лоем за 24 ч', 'trend': 'за лоем с начала тренда', '1h': 'за лоем последнего часа', 'swing': 'под лоем предыдущего отката'})[m['stop_mode']]} (для шорта — за хаем), "
             + f"тейка нет: после +{m['act'] * 100:g}% стоп в безубыток, дальше трейлинг-стоп {m['trail'] * 100:g}% от лучшей цены. "
             + "Входы круглосуточно, выхода по времени нет"
             + ". «Старт торговли» — робот покупает и продаёт сам; «Стоп торговли» — только наблюдение. Всё меняется во вкладке «Настройки»."))
@@ -1696,7 +1696,7 @@ class App(tk.Tk):
         self.v_mtpart.set(f"{float(s.get('mid_take_part', 50) or 50):g}"); self.v_mtrail.set(f"{float(s.get('mid_trail', 1.0) or 1.0):g}")
         self.v_mcarry.set(self.MCARRY.get(s.get("mid_carry", "none"), self.MCARRY["none"])); self.v_mcdays.set(str(int(s.get("mid_carry_days", 0) or 0)))
         self.v_midx.set(bool(s.get("mid_idx", False)))
-        self.v_mstop.set(self.MSTOP.get(s.get("mid_stop", "24h"), self.MSTOP["24h"]))
+        self.v_mstop.set(self.MSTOP.get(s.get("mid_stop", "swing"), self.MSTOP["swing"]))
         self.v_mact.set(f"{float(s.get('mid_act', 1.0) or 1.0):g}"); self.v_mvm.set(f"{float(s.get('mid_vol_mult', 3.0) or 3.0):g}")
         self.v_mfrom.set(str(s.get("mid_from", "04:00"))); self.v_mto.set(str(s.get("mid_to", "02:00"))); self.v_mexit.set(str(s.get("mid_exit", "02:50")))
         self.v_efrom.set(self.EFROM.get(str(s.get("entry_from") or ""), self.EFROM[""]))

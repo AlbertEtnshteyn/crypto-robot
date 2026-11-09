@@ -25,12 +25,12 @@ for tk in TK:
         print(tk, "нет истории", e); continue
     if rows:
         data[tk] = rows
-VARS = [(tf, sm) for tf in (5, 15, 60) for sm in ("24h", "trend", "1h")]
+VARS = [(tf, tr) for tf in (5, 15, 60) for tr in (0.005, 0.01, 0.015, 0.02, 0.03, 0.05)]
 SMN = {"24h": "стоп за лоем 24 ч", "trend": "стоп за лоем с начала тренда", "1h": "стоп за лоем последнего часа"}
 res = {}
 for tf, mode in VARS:
     s["mid_tfs"] = [tf]
-    m = rc.mid_cfg(s); m.update(cost=2 * 0.0005 + rc.BT_SLIP, fund={}, stop_mode=mode, no_time_exit=True, trail_mode=True, act=0.01, trail=0.01)
+    m = rc.mid_cfg(s); m.update(cost=2 * 0.0005 + rc.BT_SLIP, fund={}, stop_mode="swing", no_time_exit=True, trail_mode=True, act=0.01, trail=mode)
     tr = []
     for tk, rows in data.items():
         tr += [t for t in rc.bt_run({tk: rows}, m, None) if t["date"] >= str(start)]
@@ -42,12 +42,15 @@ for tf, mode in VARS:
     months = {}
     for t in tr:
         months[t["date"][:7]] = months.get(t["date"][:7], 0) + t["pct"]
-    print(f"ВАРИАНТ ТФ {tf} мин, {SMN[mode]}, без тейка (+1% → б/у, трейлинг 1%): сделок {len(tr)}, стоп обычно {stp:.2f}%, "
+    print(f"ВАРИАНТ ТФ {tf} мин, стоп под лоем предыдущего отката, +1% → б/у, трейлинг {mode * 100:g}%: сделок {len(tr)}, стоп обычно {stp:.2f}%, "
           f"по месяцам {', '.join(f'{k} {v:+.0f}%' for k, v in sorted(months.items()))}, "
           f"в плюсе {sum(1 for t in tr if t['pct'] > 0) / max(1, len(tr)) * 100:.0f}%, средняя {sum(t['pct'] for t in tr) / max(1, len(tr)):+.3f}%, "
           f"сумма {sum(t['pct'] for t in tr):+.1f}%, профит-фактор {pos / neg if neg else 0:.2f}", flush=True)
 for k in res:
     res[k].sort(key=lambda t: (t["date"], t["time"]))
+for tf_ in (5, 15, 60):
+    b_ = max((k for k in res if k[0] == tf_), key=lambda k: sum(t["pct"] for t in res[k]))
+    print(f"ЛУЧШИЙ ТРЕЙЛИНГ ТФ {tf_} мин: {b_[1] * 100:g}% — сумма {sum(t['pct'] for t in res[b_]):+.1f}%", flush=True)
 best = max(res, key=lambda k: sum(t["pct"] for t in res[k]))
 kept, cut = res[best], []
 print("ЛУЧШИЙ", best)
@@ -113,7 +116,7 @@ def draw(t, kind, n):
              f"{'выше' if s200[ie-1] and t['entry'] > s200[ie-1] else 'ниже'} SMA200")
     tfn = {5: "5 мин", 15: "15 мин", 60: "1 час"}[tf]
     if kind == "вход":
-        title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} · итог {t['pct']:+.2f}% ({t['reason']}) · без тейка: +1% → б/у, трейлинг 1%"
+        title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} · итог {t['pct']:+.2f}% ({t['reason']}) · стоп под лоем отката, +1% → б/у, трейлинг"
         col = UP if ok else DN
     else:
         title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} НЕ ОТКРЫТ — против тренда"

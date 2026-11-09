@@ -24,7 +24,7 @@ DEFAULTS = {"threshold": 2.0, "entry": "15:00", "capital": 10_000,
             "bybit_demo_key": "", "bybit_demo_secret": "", "bybit_real_key": "", "bybit_real_secret": "",
             "binance_demo_key": "", "binance_demo_secret": "", "binance_real_key": "", "binance_real_secret": "",
             # «Движение дня»: время — по Москве (день начинается в 03:00 МСК = 00:00 UTC); суммы — в USDT
-            "mid_allday": True, "ex_stop": True, "mid_swing_stop": True, "mid_take_mode": "all", "mid_take_part": 50, "mid_trail": 1.0, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5, "mid_stop": "24h", "mid_act": 1.0, "mid_vol_mult": 3.0}
+            "mid_allday": True, "ex_stop": True, "mid_swing_stop": True, "mid_take_mode": "all", "mid_take_part": 50, "mid_trail": 1.0, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5, "mid_stop": "swing", "mid_act": 1.0, "mid_vol_mult": 3.0}
 SECRET_KEYS = [k for k in DEFAULTS if k.endswith("_key") or k.endswith("_secret")]
 
 CHART_DEPTH = {1: 2, 5: 10, 15: 30, 60: 90, 1440: 400}       # сколько дней истории грузить на график
@@ -131,7 +131,7 @@ def mid_cfg(s):
             "min_turn": float(s.get("mid_min_turn", 0) or 0) * 1e6 if s.get("mid_minv_on", False) else 0.0,  # мин. оборот, USDT в день
             "min_vol": float(s.get("mid_vol", 0) or 0) * 1e6 if s.get("mid_vol_on", False) else 0.0,      # мин. объём сегодня, USDT
             # вход в тренде: всплеск объёма → первый откат к середине EMA10/EMA20; выход: стоп, после +act — б/у и трейлинг
-            "stop_mode": s.get("mid_stop") if s.get("mid_stop") in ("24h", "trend", "1h") else "24h",
+            "stop_mode": s.get("mid_stop") if s.get("mid_stop") in ("24h", "trend", "1h", "swing") else "swing",
             "act": max(0.001, float(s.get("mid_act", 1.0) or 1.0) / 100),
             "vol_mult": max(1.0, float(s.get("mid_vol_mult", 3.0) or 3.0)),
             "trail_mode": True, "no_time_exit": True}
@@ -707,6 +707,20 @@ def _bt_first_touch(rows, tf, vmult=None):
     return out
 
 
+def _bt_tf_bars(rows, tf):
+    """5-мин свечи → свечи ТФ: (хаи, лои, номер последней 5-мин свечи в каждой)."""
+    H, L, E = [], [], []
+    cur = None
+    for i, (t, o, h, l, c, *_) in enumerate(rows):
+        key = t.date() if tf >= 1440 else (t.date(), (t.hour * 60 + t.minute) // tf)
+        if key != cur:
+            cur = key
+            H.append(h); L.append(l); E.append(i)
+        else:
+            H[-1] = max(H[-1], h); L[-1] = min(L[-1], l); E[-1] = i
+    return H, L, E
+
+
 def _bt_trend(rows, tf):
     """EMA200 и SMA200 по закрытым свечам ТФ — для каждой 5-мин свечи (как у живого робота). None — мало истории."""
     a, a10, a20 = 2 / 201, 2 / 11, 2 / 21
@@ -740,7 +754,8 @@ def bt_run(data, m, imoex=None):
     for tk, rows in data.items():
         if len(rows) < 100:
             continue
-        touch = {tf: _bt_first_touch(rows, tf, m.get("vol_mult")) for tf in m["tfs"]}   # первые откаты каждого тренда
+        touch = {tf: _bt_first_touch(rows, tf, m.get("vol_mult")) for tf in m["tfs"]}
+        tfb = {tf: _bt_tf_bars(rows, tf) for tf in m["tfs"]} if m.get("stop_mode") == "swing" else {}   # первые откаты каждого тренда
         trend = {tf: _bt_trend(rows, tf) for tf in m["tfs"]}
         days, start = [], 0
         didx = [0] * len(rows)
@@ -786,11 +801,21 @@ def bt_run(data, m, imoex=None):
                 smode = m.get("stop_mode", at.MID_STOP_MODE)
                 seg = rows[t_start:r] if smode == "trend" else rows[max(0, r - 12):r] if smode == "1h" else rows[max(0, r - 288):r]
                 seg = seg or rows[max(0, r - 12):r]
+                sw = None
+                if smode == "swing":                           # под лоем предыдущего отката по свечам ТФ
+                    H, L, E = tfb[tf]
+                    n_ = 0
+                    while n_ < len(E) and E[n_] < r:              # закрытые к моменту входа свечи ТФ
+                        n_ += 1
+                    k0 = 0
+                    while k0 < n_ and E[k0] < t_start - 1:
+                        k0 += 1
+                    sw = at.swing_extreme(H[:n_], L[:n_], k0, sd)
                 if sd > 0:
-                    stop, take = min(x[3] for x in seg) * (1 - at.MID_STOP_BUF), hi_d
+                    stop, take = (sw if sw else min(x[3] for x in seg)) * (1 - at.MID_STOP_BUF), hi_d
                     stop = min(stop, px * (1 - at.MID_MIN_STOP))     # стоп не ближе 0,3% к цене
                 else:
-                    stop, take = max(x[2] for x in seg) * (1 + at.MID_STOP_BUF), lo_d
+                    stop, take = (sw if sw else max(x[2] for x in seg)) * (1 + at.MID_STOP_BUF), lo_d
                     stop = max(stop, px * (1 + at.MID_MIN_STOP))
                 if m.get("multi") and m.get("swing_stop") and prev_in is not None and prev_in < r:
                     sw = min(x[3] for x in rows[prev_in:r]) if sd > 0 else max(x[2] for x in rows[prev_in:r])
