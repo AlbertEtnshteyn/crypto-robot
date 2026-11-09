@@ -1392,11 +1392,12 @@ class App(tk.Tk):
                                values=(m["m"], m["n"], (f"{m['rub']:+,.0f}").replace(",", " "), f"{m['eq']:+.2f}"))
         self.bt_tr.delete(*self.bt_tr.get_children())
         tfn = {5: "5м", 15: "15м", 60: "1ч", 1440: "1д"}
+        self._bt_rows = {}
         for x in reversed(res.get("trades", [])):
-            self.bt_tr.insert("", "end", tags=("pos" if x["pct"] > 0 else "neg",),
+            self._bt_rows[self.bt_tr.insert("", "end", tags=("pos" if x["pct"] > 0 else "neg",),
                               values=(x["date"], (x.get("time_msk") or x["time"]).split()[-1], x["ticker"], tfn.get(x["tf"], x["tf"]) + (" ▼шорт" if x.get("side") == -1 else ""), f"{x['entry']:.6g}", f"{x['stop']:.6g}",
                                       f"{x['take']:.6g}", f"{x['exit']:.6g}", x["exit_time"], (f"{x.get('stake', 0):,.0f}").replace(",", " "), x["reason"], f"{x['pct']:+.2f}",
-                                      (f"{x.get('rub', 0):+,.0f}").replace(",", " ")))
+                                      (f"{x.get('rub', 0):+,.0f}").replace(",", " ")))] = x
         self._bt_curve()
 
     def _bt_curve(self):
@@ -1428,9 +1429,14 @@ class App(tk.Tk):
         sel = self.bt_tr.selection()
         if not sel:
             return
+        x = getattr(self, "_bt_rows", {}).get(sel[0])
         v = self.bt_tr.item(sel[0], "values")
         tf = {"5м": 5, "15м": 15, "1ч": 60, "1д": 1440}.get(str(v[3]).split()[0], 60)
-        self.open_chart(v[2], tf)
+        if not x:
+            self.open_chart(v[2], tf)
+            return
+        import chart
+        chart.ChartWindow(self, x["ticker"], tf if tf < 1440 else 60, bt=x)     # график за день сделки: вход ▲/▼, выход ●
 
     def _mk_charts(self, ticker):
         """Четыре графика выбранной монеты на вкладке «Рынки»: сверху 5 мин и 15 мин, снизу 1 час и 1 день."""

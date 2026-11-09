@@ -163,13 +163,37 @@ def chart_sp(s):
     return sp
 
 
-def chart_data(token, sandbox, ticker, tf, s):
-    """Свечи монеты для графика (время — UTC без пояса; экран сдвигает на московское). Возвращает (свечи, [], None)."""
+def chart_data(token, sandbox, ticker, tf, s, frm=None, to=None):
+    """Свечи монеты для графика (время — UTC без пояса; экран сдвигает на московское). Возвращает (свечи, [], None).
+    frm / to (секунды UTC) — участок истории, например вокруг сделки из проверки на истории."""
     ti = sc.TInvest()
     now = datetime.now(sc.MSK)
+    if frm:
+        from datetime import timezone as _tz
+        a = datetime.fromtimestamp(int(frm), _tz.utc)
+        b = min(datetime.fromtimestamp(int(to), _tz.utc), now) if to else now
+        return ti.candles_range(ticker, a, b + timedelta(minutes=1), tf), [], None
     frm = (now - timedelta(days=CHART_DEPTH[tf])).replace(hour=0, minute=0, second=0, microsecond=0)
     rows = ti.candles_range(ticker, frm, now + timedelta(minutes=1), tf)
     return rows, [], None
+
+
+def bt_window(t, tf):
+    """Сделка из проверки на истории → (вход, выход) по Москве без пояса и участок графика (frm, to) в секундах UTC.
+    В сделке время UTC: date «ГГГГ-ММ-ДД», time «ЧЧ:ММ», exit_time «ДД.ММ ЧЧ:ММ»."""
+    import calendar as _cal
+    e = datetime.strptime(t["date"] + " " + t["time"], "%Y-%m-%d %H:%M")
+    try:
+        x = datetime.strptime(f"{t['exit_time']}.{e.year}", "%d.%m %H:%M.%Y")
+        if x < e - timedelta(days=1):                       # выход уже в следующем году
+            x = x.replace(year=e.year + 1)
+    except (ValueError, KeyError, TypeError):
+        x = e
+    m = tf if tf < 1440 else 1440
+    a = e - timedelta(minutes=m * 260)                      # 200 свечей на EMA200/SMA200 и запас слева
+    b = x + timedelta(minutes=m * (80 if tf < 1440 else 20))
+    sh = timedelta(minutes=sc.SHIFT)
+    return e + sh, x + sh, _cal.timegm(a.timetuple()), _cal.timegm(b.timetuple())
 
 
 def ema(vals, span):
@@ -612,6 +636,26 @@ def _bt_mids(rows, tf):
     return out
 
 
+def _bt_trend(rows, tf):
+    """EMA200 и SMA200 по закрытым свечам ТФ — для каждой 5-мин свечи (как у живого робота). None — мало истории."""
+    a = 2 / 201
+    out = [None] * len(rows)
+    closes, e = [], None
+    cur_key, cur_close, val = None, None, None
+    for i, (t, o, h, l, c, *_) in enumerate(rows):
+        m = t.hour * 60 + t.minute
+        key = t.date() if tf >= 1440 else (t.date(), m // tf)
+        if key != cur_key:
+            if cur_close is not None:                 # предыдущая свеча ТФ закрылась
+                closes.append(cur_close)
+                e = cur_close if e is None else e + a * (cur_close - e)
+                val = (e, sum(closes[-200:]) / 200) if len(closes) >= 200 else None
+            cur_key = key
+        cur_close = c
+        out[i] = val
+    return out
+
+
 def bt_run(data, m, imoex=None):
     """Проверка «Движения дня» по 5-мин свечам. data: {тикер: [(t,o,h,l,c), …]}. Возвращает список сделок.
     Лонг: бумага выросла на порог → покупка на середине EMA10/EMA20, стоп за лоем дня, тейк на хае.
@@ -624,6 +668,7 @@ def bt_run(data, m, imoex=None):
         if len(rows) < 100:
             continue
         mids = {tf: _bt_mids(rows, tf) for tf in m["tfs"]}
+        trend = {tf: _bt_trend(rows, tf) for tf in m["tfs"]}
         days, start = [], 0
         didx = [0] * len(rows)
         for i in range(1, len(rows) + 1):
@@ -700,6 +745,9 @@ def bt_run(data, m, imoex=None):
                     if (px - sw) * sd > 0 and abs(px / sw - 1) >= at.MID_MIN_STOP:   # повторный вход — стоп за лоем предыдущего движения
                         stop = sw * (1 - sd * at.MID_STOP_BUF)
                 if not ((px - stop) * sd > 0 and (take - px) * sd > 0):
+                    r += 1; continue
+                tr_ = trend[tf][r]                         # всегда: лонг выше EMA200 и SMA200, шорт ниже обеих
+                if tr_ is None or (px - tr_[0]) * sd <= 0 or (px - tr_[1]) * sd <= 0:
                     r += 1; continue
                 ex_day = di if tm[r - a] < ex else di + 1          # вошли после времени выхода — выход на следующий день
                 ret = lambda p_: sd * (p_ / px - 1)

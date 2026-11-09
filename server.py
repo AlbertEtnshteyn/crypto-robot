@@ -495,9 +495,9 @@ def chart_tail(ticker, tf):
     return {"ticker": ticker, "tf": tf, "bars": bars, "positions": poss}
 
 
-def chart(ticker, tf):
+def chart(ticker, tf, frm=None, to=None):
     s = ROBOT.s
-    rows, trades, tier = rc.chart_data(None, True, ticker, tf, s)
+    rows, trades, tier = rc.chart_data(None, True, ticker, tf, s, frm, to)
     closes = [r["c"] for r in rows]
     e10, e20, e200 = rc.ema(closes, 10), rc.ema(closes, 20), rc.ema(closes, 200)
     s200 = [sum(closes[i - 199:i + 1]) / 200 if i >= 199 else None for i in range(len(closes))]
@@ -760,7 +760,8 @@ class Handler(BaseHTTPRequestHandler):
                 tf = int(q.get("tf", 15))
                 if tf not in rc.CHART_DEPTH:
                     raise ValueError("таймфрейм")
-                return self._send(200, chart(q.get("ticker", "BTCUSDT").upper().strip(), tf))
+                return self._send(200, chart(q.get("ticker", "BTCUSDT").upper().strip(), tf,
+                                             int(q["frm"]) if q.get("frm") else None, int(q["to"]) if q.get("to") else None))
             if u.path == "/api/check":
                 return self._send(200, {"lines": __import__("exchange").check_all(ROBOT.s)})
             return self._send(404, {"error": "нет такого"})

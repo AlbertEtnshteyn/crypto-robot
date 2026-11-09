@@ -45,9 +45,10 @@ def _to_msk(t):
     return t.replace(tzinfo=None) + timedelta(minutes=sc.SHIFT)
 
 class _ChartBase:
-    def __init__(self, app, ticker, tf=5, parent=None, compact=False):
+    def __init__(self, app, ticker, tf=5, parent=None, compact=False, bt=None):
         super().__init__(parent or app)
         self.compact = compact
+        self.bt = bt                  # сделка из «Проверки на истории»: график за её участок истории, вход и выход отмечены
         self.app = app
         self.ticker = ticker.upper()
         self.tf = tf
@@ -134,7 +135,7 @@ class _ChartBase:
         if self.compact:
             self.head.configure(text=f"{self.ticker} · {({5: '5 мин', 15: '15 мин', 60: '1 час', 1440: '1 день'}).get(self.tf, name)}")
         else:
-            self.title(f"{self.ticker} · {name} · график")
+            self.title(f"{self.ticker} · {name} · " + ("сделка на истории" if self.bt else "график"))
 
     def set_tf(self, tf):
         self.tf, self.offset, self.ypan, self.yzoom = tf, 0, 0.0, 1.0
@@ -144,6 +145,8 @@ class _ChartBase:
     def set_ticker(self):
         t = self.v_tk.get().strip().upper()
         if t:
+            if t != self.ticker:
+                self.bt = None                       # другая монета — обычный живой график
             self.ticker, self.offset, self.ypan, self.yzoom = t, 0, 0.0, 1.0
             self._mark_tf()
             self.load()
@@ -156,15 +159,19 @@ class _ChartBase:
         self.loading = True
         self.info.configure(text=f"Загружаю {self.ticker}…")
         tk_, tf = self.ticker, self.tf
+        win = {}
+        if self.bt:
+            self.bt_in, self.bt_out, a, b = rc.bt_window(self.bt, tf)
+            win = {"frm": a, "to": b}
 
         def job():
             try:
                 if srv:                          # через сервер робота
-                    d = srv.get("/api/chart", ticker=tk_, tf=tf)
+                    d = srv.get("/api/chart", ticker=tk_, tf=tf, **win)
                     rows, trades, tier = _from_server(d)
                     self.real = d.get("real") or []
                 else:
-                    rows, trades, tier = rc.chart_data(None, False, tk_, tf, self.app.s)
+                    rows, trades, tier = rc.chart_data(None, False, tk_, tf, self.app.s, win.get("frm"), win.get("to"))
                     rows = [dict(r, t=_to_msk(r["t"])) for r in rows]              # время на графике — московское
                     self.real = rc.real_trades(tk_)
                 self.tier = tier or ""
@@ -189,6 +196,9 @@ class _ChartBase:
             return
         rows, self.trades = rows if rows else ([], [])
         self.bars = rows or []
+        if self.bt:
+            self.real = []                           # на графике сделки из истории — только она
+            self._focus_bt()
         self._summary()
         if not self.bars:
             self.info.configure(text=f"{self.ticker}: свечей нет")
@@ -201,7 +211,30 @@ class _ChartBase:
                   trail_r=float(s.get("spike_trail", 1.0)))
         return sp
 
+    def _focus_bt(self):
+        """Показать сделку из истории целиком: от входа до выхода с запасом по краям."""
+        times = [b["t"].replace(tzinfo=None) for b in self.bars]
+        if not times:
+            return
+        ie = next((i for i, t in enumerate(times) if t >= self.bt_in), len(times) - 1)
+        ix = next((i for i, t in enumerate(times) if t >= self.bt_out), len(times) - 1)
+        self.n_vis = max(120, min(800, ix - ie + 90))
+        self.offset = max(0, len(times) - 1 - (ix + 30))
+        self.ypan, self.yzoom = 0.0, 1.0
+
+    def _bt_mark(self):
+        t = self.bt
+        return {"side": t.get("side", 1), "entry": t["entry"], "exit": t["exit"], "reason": t.get("reason", ""),
+                "result_pct": t.get("pct", 0), "stop": t.get("stop"), "take": t.get("take"), "bt": True,
+                "entry_time": self.bt_in.strftime("%Y-%m-%d %H:%M"), "exit_time": self.bt_out.strftime("%Y-%m-%d %H:%M")}
+
     def _summary(self):
+        if self.bt:
+            t = self.bt
+            self.sum_lbl.configure(text=f"сделка на истории: {'ЛОНГ' if t.get('side', 1) > 0 else 'ШОРТ'} "
+                                        f"вход {self.bt_in:%d.%m %H:%M} по {_fmt(t['entry'])} → выход {self.bt_out:%d.%m %H:%M} "
+                                        f"по {_fmt(t['exit'])} ({t.get('reason', '')}), итог {t.get('pct', 0):+.2f}% · время МСК")
+            return
         R = getattr(self, "real", None) or []
         if not R:
             self.sum_lbl.configure(text="сделок робота по монете ещё не было")
@@ -224,7 +257,7 @@ class _ChartBase:
         """Полная перезагрузка (с разметкой сделок) — раз в минуту; между ними — быстрое обновление последних свечей."""
         if not self.winfo_exists():
             return
-        if self.offset == 0:
+        if self.offset == 0 and not self.bt:
             self.load()
         self.after(60000, self._auto)
 
@@ -234,7 +267,7 @@ class _ChartBase:
 
     def live_price(self, px):
         """Цена из живого потока (на каждую сделку): двигает текущую свечу, новую свечу рисует сразу."""
-        if self.loading or not self.bars or not px:
+        if self.loading or not self.bars or not px or self.bt:
             return
         b = self.bars[-1]
         now = datetime.now(sc.MSK).replace(tzinfo=None)
@@ -266,7 +299,7 @@ class _ChartBase:
         self._watch()
         if self.app.live_px.get(self.ticker) and time.time() - getattr(self.app, "live_t", 0) < 3:
             return                                  # поток работает
-        if self.loading or not self.bars or self.offset or getattr(self, "_live_busy", False):
+        if self.loading or not self.bars or self.offset or self.bt or getattr(self, "_live_busy", False):
             return
         self._live_busy = True
         tk_ = self.ticker
@@ -305,7 +338,7 @@ class _ChartBase:
         if not self.winfo_exists():
             return
         self.after(3000, self._fast)
-        if self.loading or not self.bars or getattr(self, "_tail_busy", False):
+        if self.loading or not self.bars or self.bt or getattr(self, "_tail_busy", False):
             return
         self._tail_busy = True
         tk_, tf = self.ticker, self.tf
@@ -435,6 +468,10 @@ class _ChartBase:
         lo = min(min(b["l"] for b in vis), min(e20[start:end]), min(e10[start:end]))
         hi = max(max(b["h"] for b in vis), max(e20[start:end]), max(e10[start:end]))
         poss = self._positions()
+        if self.bt and vis[0]["t"].replace(tzinfo=None) <= self.bt_out and vis[-1]["t"].replace(tzinfo=None) >= self.bt_in:
+            for lv in (self.bt.get("entry"), self.bt.get("exit"), self.bt.get("stop"), self.bt.get("take")):
+                if lv:
+                    lo, hi = min(lo, lv), max(hi, lv)
         for p in poss:
             for lv in (p.get("stop"), p.get("entry"), p.get("take"), p.get("take2")):
                 if lv:
@@ -539,25 +576,37 @@ class _ChartBase:
             k = max(i for i, tt in enumerate(times) if tt <= t) if t >= times[0] else 0
             return x0 + (k + 0.5) * bw
         marks = [dict(r, open=False) for r in getattr(self, "real", [])]
+        if self.bt:
+            marks.append(dict(self._bt_mark(), open=False))
         for p in poss:
             marks.append({"side": p["side"], "entry": p["entry"], "entry_time": f"{p.get('date', '')} {str(p.get('time', ''))[:5]}",
                           "open": True})
+        hm = lambda ts: f"{str(ts)[8:10]}.{str(ts)[5:7]} {str(ts)[11:16]}"
         for r in marks:
             s_ = r["side"]
             xe = xi(r.get("entry_time") or "")
+            xx0 = xi(r.get("exit_time") or "") if not r["open"] else None
+            if r.get("bt") and xe is not None:              # стоп и тейк сделки из истории — от входа до выхода
+                x2 = xx0 if xx0 is not None else pw
+                for lv, col_, nm in ((r.get("stop"), DOWN, "стоп"), (r.get("take"), UP, "тейк")):
+                    if lv:
+                        cv.create_line(xe, y(lv), x2, y(lv), fill=col_, dash=(5, 3), width=1.5)
+                        cv.create_text(xe - 4, y(lv), text=f"{nm} {_fmt(lv)}", fill=col_, anchor="e", font=("Consolas", 8))
             if xe is not None and r.get("entry"):
                 ye = y(r["entry"])
                 pts = (xe, ye + 9, xe - 6, ye + 19, xe + 6, ye + 19) if s_ > 0 else (xe, ye - 9, xe - 6, ye - 19, xe + 6, ye - 19)
                 cv.create_polygon(*pts, fill=UP if s_ > 0 else DOWN, outline="white")
-                cv.create_text(xe + 8, ye + (14 if s_ > 0 else -14), text=("вход" + (" (открыта)" if r["open"] else "")),
-                               fill=TXT, anchor="w", font=("Segoe UI", 8))
-            xx = xi(r.get("exit_time") or "") if not r["open"] else None
+                cv.create_text(xe + 8, ye + (14 if s_ > 0 else -14), text=("вход" + (" (открыта)" if r["open"] else "")
+                               + f" {_fmt(r['entry'])} · {hm(r.get('entry_time') or '')}"),
+                               fill="white" if r.get("bt") else TXT, anchor="w", font=("Segoe UI", 9 if r.get("bt") else 8, "bold" if r.get("bt") else "normal"))
+            xx = xx0
             if xx is not None and r.get("exit"):
                 yx = y(r["exit"])
                 rp = r.get("result_pct") or 0
                 col_ = UP if rp > 0 else DOWN
                 cv.create_oval(xx - 5, yx - 5, xx + 5, yx + 5, fill=col_, outline="white")
-                cv.create_text(xx + 8, yx - 10, text=f"{r.get('reason', '')} {rp:+.2f}%", fill=col_, anchor="w", font=("Segoe UI", 8, "bold"))
+                cv.create_text(xx + 8, yx - 10, text=f"выход {r.get('reason', '')} {rp:+.2f}% · {_fmt(r['exit'])} · {hm(r.get('exit_time') or '')}",
+                               fill=col_, anchor="w", font=("Segoe UI", 9 if r.get("bt") else 8, "bold"))
                 if xe is not None:
                     cv.create_line(xe, y(r["entry"]), xx, yx, fill=col_, dash=(2, 3))
         # уровни позиции
@@ -594,6 +643,14 @@ class _ChartBase:
                 xc = x0 + (k + 0.5) * bw
                 cv.create_line(xc, 0, xc, ph, fill="#4a4f5c", dash=(2, 2))
                 cv.create_line(0, self.hover[1], pw, self.hover[1], fill="#4a4f5c", dash=(2, 2))
+                hy = self.hover[1]
+                if 0 <= hy <= price_h:                       # цена под мышью — на шкале справа
+                    cv.create_rectangle(pw, hy - 9, W, hy + 9, fill="#363a45", outline="#363a45")
+                    cv.create_text(pw + 6, hy, text=_fmt(self._price_at(hy)), fill="white", anchor="w", font=("Consolas", 9, "bold"))
+                tl = b["t"].strftime("%d.%m.%y" if self.tf >= 1440 else "%d.%m %H:%M")     # время свечи — на шкале снизу
+                tw = 4 + 7 * len(tl) / 2
+                cv.create_rectangle(xc - tw, ph + 2, xc + tw, H, fill="#363a45", outline="#363a45")
+                cv.create_text(xc, ph + 11, text=tl, fill="white", font=("Consolas", 8, "bold"))
             else:
                 b, k = vis[-1], len(vis) - 1
         chg = (b["c"] / b["o"] - 1) * 100 if b["o"] else 0

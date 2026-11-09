@@ -1098,6 +1098,9 @@ class AutoTrader:
                 self.log(f"«Движение дня»: {tk} дошла до середины EMA ({px:.4g}), но цена уже "
                          + ("у стопа" if (px - stop) * side <= 0 else "у тейка") + f" — {what.lower()} не делаю.")
                 continue
+            if not self._ema200_all(tk, tf, side, now):        # всегда: лонг выше EMA200 и SMA200, шорт ниже обеих
+                self.log(f"«Движение дня»: {tk} дошла до середины EMA на {self._tf_name(tf)}, но {self._e200_why}")
+                continue
             base = self.capital
             try:
                 base = self.b.portfolio_value() or self.capital
@@ -1649,6 +1652,9 @@ class AutoTrader:
             return
         if side < 0 and not sh["short"]:
             self.log(f"  {tk}: шорт по бумаге недоступен, пропуск")
+            return
+        if strat != "manual" and not self._ema200_all(tk, tf or 15, side, self.clock()):
+            self.log(f"  {tk}: {self._e200_why}")
             return
         if strat == "spike" and ((stop_level - px) * side >= 0 or (t1 - px) * side < 0.5 * abs(px - stop_level)):
             self.log(f"  {tk}: цена {px:.4g} уже слишком близко к стопу или тейку — вход невыгоден, пропуск")

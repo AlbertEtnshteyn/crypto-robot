@@ -340,7 +340,7 @@ $("#startBtn").onclick = async () => {
 };
 
 // ---------------------------------------------------------------- график
-const CH = { chart: null, tf: 15, ticker: "SBER", data: null, go: 0, lines: [] };
+const CH = { chart: null, tf: 15, ticker: "SBER", data: null, go: 0, lines: [], bt: null };   // bt — сделка из проверки на истории
 const TFNAME = { 1: "1м", 5: "5м", 15: "15м", 60: "1ч", 1440: "Д" };
 
 function ensureChart() {
@@ -366,11 +366,22 @@ function ensureChart() {
   new ResizeObserver(() => c.applyOptions({ width: el.clientWidth, height: el.clientHeight })).observe(el);
 }
 
-function openChart(tk, tf) { CH.ticker = tk; CH.tf = tf || CH.tf; $("#chTicker").value = tk; showTab("chart"); loadChart(); }
+function openChart(tk, tf, bt) { CH.bt = bt || null; CH.ticker = tk; CH.tf = tf || CH.tf; $("#chTicker").value = tk; showTab("chart"); loadChart(); }
+
+// сделка из проверки на истории: время в ней UTC (date, time, exit_time «ДД.ММ ЧЧ:ММ»); на графике — МСК «как есть» в секундах
+function btTimes(t, tf) {
+  const [Y, Mo, D] = t.date.split("-").map(Number), [h, mi] = t.time.split(":").map(Number);
+  const e = Date.UTC(Y, Mo - 1, D, h, mi) / 1000;
+  const m = /^(\d\d)\.(\d\d) (\d\d):(\d\d)/.exec(t.exit_time || "");
+  let x = m ? Date.UTC(Y, +m[2] - 1, +m[1], +m[3], +m[4]) / 1000 : e;
+  if (x < e - 86400) x = m ? Date.UTC(Y + 1, +m[2] - 1, +m[1], +m[3], +m[4]) / 1000 : e;   // выход в следующем году
+  const s = Math.min(tf, 1440) * 60;
+  return { e: e + 10800, x: x + 10800, frm: e - s * 260, to: x + s * (tf < 1440 ? 80 : 20) };
+}
 
 function markTf() { $$("#tfSeg button").forEach((b) => b.classList.toggle("on", +b.dataset.tf === CH.tf)); }
 $$("#tfSeg button").forEach((b) => (b.onclick = () => { CH.tf = +b.dataset.tf; loadChart(); }));
-$("#chTicker").addEventListener("change", () => { CH.ticker = $("#chTicker").value.trim().toUpperCase(); loadChart(); });
+$("#chTicker").addEventListener("change", () => { const t = $("#chTicker").value.trim().toUpperCase(); if (t !== CH.ticker) CH.bt = null; CH.ticker = t; loadChart(); });
 $("#chTicker").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
 $("#chHist").onchange = () => drawTrades();
 function fitPrice() {
@@ -401,6 +412,7 @@ function chartPrice(price, t) {                 // t — время МСК «к�
 }
 let LIVE_BUSY = false;
 async function chartLive() {
+  if (CH.bt) return;                                   // график сделки из истории — без живой цены
   if (LIVE_BUSY || (LV.ok && Date.now() - LV.t < 3000 && LV.p[CH.ticker])) return;   // есть живой поток — опрос не нужен
   LIVE_BUSY = true;
   const tk = CH.ticker;
@@ -412,7 +424,7 @@ async function chartLive() {
 }
 let TAIL_BUSY = false;
 async function chartTail() {
-  if (TAIL_BUSY) return;
+  if (TAIL_BUSY || CH.bt) return;
   TAIL_BUSY = true;
   const tk = CH.ticker, tf = CH.tf;
   try {
@@ -434,8 +446,10 @@ async function loadChart(quiet) {
   const tk = CH.ticker, tf = CH.tf;
   if (!quiet) $("#chartInfo").textContent = `Загружаю ${tk} ${TFNAME[tf]}…`;
   try {
-    const d = await api(`/api/chart?ticker=${encodeURIComponent(tk)}&tf=${tf}`);
+    const W = CH.bt ? btTimes(CH.bt, tf) : null;
+    const d = await api(`/api/chart?ticker=${encodeURIComponent(tk)}&tf=${tf}` + (W ? `&frm=${W.frm}&to=${W.to}` : ""));
     if (tk !== CH.ticker || tf !== CH.tf) return;
+    if (W) { d.real = []; d.positions = []; d.btw = W; quiet = false; }
     const keepRange = quiet && CH.data && CH.data.bars.length ? CH.chart.timeScale().getVisibleLogicalRange() : null;
     CH.data = d;
     const B = d.bars;
@@ -451,9 +465,16 @@ async function loadChart(quiet) {
     CH.candles.applyOptions({ priceFormat: { type: "price", precision: prec, minMove: Math.pow(10, -prec) } });
     $("#chTbank").href = d.tbank;
     drawTrades();
-    if (keepRange) CH.chart.timeScale().setVisibleLogicalRange(keepRange);
+    if (W) {                                           // показать сделку целиком: от входа до выхода с запасом
+      let ie = B.findIndex((b) => b.t >= W.e), ix = B.findIndex((b) => b.t >= W.x);
+      if (ie < 0) ie = B.length - 1; if (ix < 0) ix = B.length - 1;
+      const pad = Math.max(25, Math.round((ix - ie) * 0.4));
+      CH.chart.timeScale().setVisibleLogicalRange({ from: ie - pad, to: ix + pad });
+    } else if (keepRange) CH.chart.timeScale().setVisibleLogicalRange(keepRange);
     else CH.chart.timeScale().setVisibleLogicalRange({ from: B.length - 120, to: B.length + 12 });
     summary(d);
+    if (W) { const t = CH.bt, d2 = (s) => new Date(s * 1000).toISOString().slice(5, 16).replace("T", " ").replace("-", ".").replace(/^(\d\d)\.(\d\d)/, "$2.$1");
+      $("#chartInfo").innerHTML = `${esc(tk)} ${TFNAME[tf]} · сделка на истории: <b class="${t.side === -1 ? "down" : "up"}">${t.side === -1 ? "ШОРТ" : "ЛОНГ"}</b> вход ${d2(W.e)} по ${fmt(t.entry)} → выход ${d2(W.x)} по ${fmt(t.exit)} (${esc(t.reason)}), итог <b class="${cls(t.pct)}">${pct(t.pct)}</b> · время МСК`; }
     if (!quiet) CH.go = 0;
   } catch (e) { if (e.message !== "401") $("#chartInfo").textContent = "Ошибка: " + e.message; }
 }
@@ -493,12 +514,20 @@ function drawTrades() {
   const bar = (t) => { if (t == null || !d.bars.length || t < d.bars[0].t) return null; let k = null; for (const b of d.bars) { if (b.t <= t) k = b.t; else break; } return k; };
   for (const r of d.real || []) {
     const te = bar(ts(r.entry_time)), tx = bar(ts(r.exit_time));
-    if (te != null) M.push({ time: te, position: r.side > 0 ? "belowBar" : "aboveBar", color: r.side > 0 ? "#00e676" : "#ff5252", shape: r.side > 0 ? "arrowUp" : "arrowDown", text: "вход" });
-    if (tx != null) M.push({ time: tx, position: r.side > 0 ? "aboveBar" : "belowBar", color: (r.result_pct || 0) > 0 ? "#26a69a" : "#ef5350", shape: "circle", text: (r.reason || "") + " " + pct(r.result_pct || 0) });
+    if (te != null) M.push({ time: te, position: r.side > 0 ? "belowBar" : "aboveBar", color: r.side > 0 ? "#00e676" : "#ff5252", shape: r.side > 0 ? "arrowUp" : "arrowDown", text: `вход ${fmt(r.entry)} · ${(r.entry_time || "").slice(11, 16)}` });
+    if (tx != null) M.push({ time: tx, position: r.side > 0 ? "aboveBar" : "belowBar", color: (r.result_pct || 0) > 0 ? "#26a69a" : "#ef5350", shape: "circle", text: `выход ${r.reason || ""} ${pct(r.result_pct || 0)} · ${fmt(r.exit)} · ${(r.exit_time || "").slice(11, 16)}` });
   }
   for (const p of d.positions || []) {
     const te = bar(ts(`${p.date || ""} ${String(p.time || "").slice(0, 5)}`));
     if (te != null) M.push({ time: te, position: p.side > 0 ? "belowBar" : "aboveBar", color: p.side > 0 ? "#00e676" : "#ff5252", shape: p.side > 0 ? "arrowUp" : "arrowDown", text: "вход (открыта)" });
+  }
+  if (d.btw && CH.bt) {                                 // сделка из проверки на истории
+    const t = CH.bt, L = d.btw, s = t.side === -1 ? -1 : 1, hm = (x) => new Date(x * 1000).toISOString().slice(11, 16);
+    const te = bar(L.e), tx = bar(L.x);
+    if (te != null) M.push({ time: te, position: s > 0 ? "belowBar" : "aboveBar", color: s > 0 ? "#00e676" : "#ff5252", shape: s > 0 ? "arrowUp" : "arrowDown", text: `вход ${fmt(t.entry)} · ${hm(L.e)}` });
+    if (tx != null) M.push({ time: tx, position: s > 0 ? "aboveBar" : "belowBar", color: t.pct > 0 ? "#26a69a" : "#ef5350", shape: "circle", text: `выход ${t.reason} ${pct(t.pct)} · ${fmt(t.exit)} · ${hm(L.x)}` });
+    for (const [v, c, n] of [[t.entry, "#e0e0e0", "вход"], [t.stop, "#ef5350", "стоп"], [t.take, "#26a69a", "тейк"], [t.exit, t.pct > 0 ? "#26a69a" : "#ef5350", "выход"]])
+      if (v) CH.lines.push(CH.candles.createPriceLine({ price: v, color: c, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: n }));
   }
   M.sort((a, b) => a.time - b.time);
   CH.candles.setMarkers(M);
@@ -871,8 +900,9 @@ async function loadBT() {
      уже учтены: комиссия −${rub(S.fees || 0)}, фандинг ${rub(S.funding || 0, true)}<br>прибыльная ${pct(S.avg_win)} · убыточная ${pct(S.avg_loss)} · выходы: ${Object.entries(S.reasons || {}).map(([k, v]) => esc(k) + " " + v).join(", ")}</div></div>`;
   $("#btMon").innerHTML = (S.months || []).map((m) => `<div class="item"><div class="hd"><span>${esc(m.m)} · сделок ${m.n}</span><span class="${cls(m.rub)}">${rub(m.rub, true)} · ${pct(m.eq)}</span></div></div>`).join("");
   const tfn = { 5: "5м", 15: "15м", 60: "1ч", 1440: "1д" };
-  $("#btTr").innerHTML = (r.trades || []).slice().reverse().slice(0, 300).map((x) =>
-    `<div class="item tap" data-chart="${esc(x.ticker)}" data-tf="${x.tf}"><div class="hd"><span><b>${esc(x.ticker)}</b> <span class="muted small">${esc(x.time_msk || (x.date + " " + x.time))} МСК · EMA ${tfn[x.tf] || x.tf}${x.side === -1 ? " · <b class='down'>шорт</b>" : ""}</span></span><span class="${cls(x.pct)}">${pct(x.pct)}${x.rub != null ? " · " + rub(x.rub, true) : ""}</span></div>
+  BT_TRADES = (r.trades || []).slice().reverse().slice(0, 300);
+  $("#btTr").innerHTML = BT_TRADES.map((x, i) =>
+    `<div class="item tap" data-bt="${i}"><div class="hd"><span><b>${esc(x.ticker)}</b> <span class="muted small">${esc(x.time_msk || (x.date + " " + x.time))} МСК · EMA ${tfn[x.tf] || x.tf}${x.side === -1 ? " · <b class='down'>шорт</b>" : ""}</span></span><span class="${cls(x.pct)}">${pct(x.pct)}${x.rub != null ? " · " + rub(x.rub, true) : ""}</span></div>
      <div class="meta">${x.stake ? "на " + rub(x.stake) + " · " : ""}вход ${fmt(x.entry)} · стоп ${fmt(x.stop)} · тейк ${fmt(x.take)} → ${fmt(x.exit)} (${esc(x.reason)}, ${esc(x.exit_time)})</div></div>`).join("");
   drawBTCurve(S.curve || []);
 }
@@ -905,6 +935,11 @@ $("#btReset").onclick = async () => {
   for (const id of ["#btSet", "#btSum", "#btMon", "#btTr"]) $(id).innerHTML = "";
   drawBTCurve([]); toast("Проверка сброшена"); loadBT();
 };
+let BT_TRADES = [];
+$("#btTr").addEventListener("click", (e) => {           // сделка на истории → график за её день: вход ▲/▼, выход ●
+  const it = e.target.closest("[data-bt]"); if (!it) return;
+  const x = BT_TRADES[+it.dataset.bt]; if (x) openChart(x.ticker, x.tf < 1440 ? x.tf : 60, x);
+});
 $("#btStop").onclick = async () => { try { await api("/api/backtest", { stop: true }); } catch (e) { } loadBT(); };
 
 // ---------------------------------------------------------------- рынки: 4 графика выбранной бумаги
