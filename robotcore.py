@@ -638,9 +638,9 @@ def _bt_mids(rows, tf):
 
 def _bt_trend(rows, tf):
     """EMA200 и SMA200 по закрытым свечам ТФ — для каждой 5-мин свечи (как у живого робота). None — мало истории."""
-    a = 2 / 201
+    a, a10, a20 = 2 / 201, 2 / 11, 2 / 21
     out = [None] * len(rows)
-    closes, e = [], None
+    closes, e, e10, e20 = [], None, None, None
     cur_key, cur_close, val = None, None, None
     for i, (t, o, h, l, c, *_) in enumerate(rows):
         m = t.hour * 60 + t.minute
@@ -649,7 +649,9 @@ def _bt_trend(rows, tf):
             if cur_close is not None:                 # предыдущая свеча ТФ закрылась
                 closes.append(cur_close)
                 e = cur_close if e is None else e + a * (cur_close - e)
-                val = (e, sum(closes[-200:]) / 200) if len(closes) >= 200 else None
+                e10 = cur_close if e10 is None else e10 + a10 * (cur_close - e10)
+                e20 = cur_close if e20 is None else e20 + a20 * (cur_close - e20)
+                val = (e, sum(closes[-200:]) / 200, e10, e20) if len(closes) >= 200 else None
             cur_key = key
         cur_close = c
         out[i] = val
@@ -747,7 +749,7 @@ def bt_run(data, m, imoex=None):
                 if not ((px - stop) * sd > 0 and (take - px) * sd > 0):
                     r += 1; continue
                 tr_ = trend[tf][r]                         # всегда: лонг выше EMA200 и SMA200, шорт ниже обеих
-                if tr_ is None or (px - tr_[0]) * sd <= 0 or (px - tr_[1]) * sd <= 0:
+                if tr_ is None or (px - tr_[0]) * sd <= 0 or (px - tr_[1]) * sd <= 0 or (tr_[2] - tr_[3]) * sd <= 0:
                     r += 1; continue
                 ex_day = di if tm[r - a] < ex else di + 1          # вошли после времени выхода — выход на следующий день
                 ret = lambda p_: sd * (p_ / px - 1)

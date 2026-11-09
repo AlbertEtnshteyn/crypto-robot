@@ -2155,8 +2155,12 @@ class AutoTrader:
         return True
 
     def _ema200_ok(self, tk, tf, s, now):
-        """Фильтр тренда (всегда включён): лонг — только если цена выше и EMA200, и SMA200, шорт — только если ниже обеих."""
-        key = (tk, tf, now.strftime("%Y-%m-%d" if tf >= 1440 else "%Y-%m-%d %H"))
+        """Фильтр тренда (всегда включён): лонг — только если цена выше и EMA200, и SMA200, а EMA10 выше EMA20;
+        шорт — только если цена ниже обеих, а EMA10 ниже EMA20. EMA10/EMA20 — по закрытым свечам ТФ."""
+        bucket = now.replace(second=0, microsecond=0, tzinfo=None)
+        if tf < 1440:
+            bucket -= timedelta(minutes=(bucket.hour * 60 + bucket.minute) % tf)
+        key = (tk, tf, bucket.strftime("%Y-%m-%d" if tf >= 1440 else "%Y-%m-%d %H:%M"))
         cache = self.__dict__.setdefault("_e200", {})
         if key not in cache:
             days = {5: 5, 15: 8, 60: 30, 1440: 420}.get(tf, 8)
@@ -2164,7 +2168,7 @@ class AutoTrader:
                 rows = self.b.ti.candles_range(tk, now - timedelta(days=days), now, tf)
                 naive = now.replace(tzinfo=None)
                 cl = [r["c"] for r in rows if tf >= 1440 or r["t"] + timedelta(minutes=tf) <= naive]   # день — с текущей ценой
-                cache[key] = (ema(cl, 200)[-1], sum(cl[-200:]) / 200) if len(cl) >= 200 else None
+                cache[key] = (ema(cl, 200)[-1], sum(cl[-200:]) / 200, ema(cl, 10)[-1], ema(cl, 20)[-1]) if len(cl) >= 200 else None
             except sc.CertError:
                 raise
             except Exception as e:
@@ -2181,14 +2185,16 @@ class AutoTrader:
                 px = self.b.last_prices([tk]).get(tk)
             except Exception:
                 px = None
-        e200, s200 = ma
+        e200, s200, e10, e20 = ma
         if not px:
             self._e200_why = "нет цены для EMA200/SMA200 — не вхожу"
             return False
-        bad = [f"{n} {v:.4g}" for n, v in (("EMA200", e200), ("SMA200", s200)) if (px - v) * s <= 0]
-        if bad:
-            self._e200_why = (f"{'лонг' if s > 0 else 'шорт'}: цена {px:.4g} {'не выше' if s > 0 else 'не ниже'} "
-                              f"{', '.join(bad)} ({tfn}) — не вхожу")
+        ma_bad = [f"{n} {v:.4g}" for n, v in (("EMA200", e200), ("SMA200", s200)) if (px - v) * s <= 0]
+        why = [f"цена {px:.4g} {'не выше' if s > 0 else 'не ниже'} {', '.join(ma_bad)}"] if ma_bad else []
+        if (e10 - e20) * s <= 0:
+            why.append(f"EMA10 {e10:.4g} {'ниже' if s > 0 else 'выше'} EMA20 {e20:.4g}")
+        if why:
+            self._e200_why = f"{'лонг' if s > 0 else 'шорт'}: {'; '.join(why)} ({tfn}) — не вхожу"
             return False
         return True
 
