@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt matplotlib
-      - run: python tools/examples.py 30
+      - run: python tools/examples.py 90
       - name: Картинки в релиз «examples»
         env:
           GH_TOKEN: ${{ github.token }}

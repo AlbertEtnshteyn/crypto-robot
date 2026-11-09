@@ -25,19 +25,29 @@ for tk in TK:
         print(tk, "нет истории", e); continue
     if rows:
         data[tk] = rows
-VARS = [(tf, mode) for tf in (5, 15, 60) for mode in ("skip", "take")]
+VARS = [(tf, sm) for tf in (5, 60) for sm in ("24h", "trend", "1h")]
+SMN = {"24h": "стоп за лоем 24 ч", "trend": "стоп за лоем с начала тренда", "1h": "стоп за лоем последнего часа"}
 res = {}
 for tf, mode in VARS:
     s["mid_tfs"] = [tf]
-    m = rc.mid_cfg(s); m.update(cost=2 * 0.0005 + rc.BT_SLIP, fund={}, rr=1.5, rr_mode=mode, no_time_exit=True)
+    m = rc.mid_cfg(s); m.update(cost=2 * 0.0005 + rc.BT_SLIP, fund={}, rr=1.5, rr_mode="take", stop_mode=mode, no_time_exit=True)
     tr = []
     for tk, rows in data.items():
         tr += [t for t in rc.bt_run({tk: rows}, m, None) if t["date"] >= str(start)]
     pos = sum(t["pct"] for t in tr if t["pct"] > 0); neg = -sum(t["pct"] for t in tr if t["pct"] < 0)
     res[(tf, mode)] = tr
-    print(f"ВАРИАНТ ТФ {tf} мин, {'пропуск если тейк < 1,5 стопа' if mode == 'skip' else 'тейк от риска 1:1,5'}: сделок {len(tr)}, "
+    import statistics as _st
+    mdd = min((sum(t["pct"] for t in tr[:k + 1]) for k in range(len(tr))), default=0)
+    stp = _st.median([abs(t["entry"] / t["stop"] - 1) * 100 for t in tr]) if tr else 0
+    months = {}
+    for t in tr:
+        months[t["date"][:7]] = months.get(t["date"][:7], 0) + t["pct"]
+    print(f"ВАРИАНТ ТФ {tf} мин, {SMN[mode]}, тейк 1:1,5: сделок {len(tr)}, стоп обычно {stp:.2f}%, "
+          f"по месяцам {', '.join(f'{k} {v:+.0f}%' for k, v in sorted(months.items()))}, "
           f"в плюсе {sum(1 for t in tr if t['pct'] > 0) / max(1, len(tr)) * 100:.0f}%, средняя {sum(t['pct'] for t in tr) / max(1, len(tr)):+.3f}%, "
           f"сумма {sum(t['pct'] for t in tr):+.1f}%, профит-фактор {pos / neg if neg else 0:.2f}", flush=True)
+for k in res:
+    res[k].sort(key=lambda t: (t["date"], t["time"]))
 best = max(res, key=lambda k: sum(t["pct"] for t in res[k]))
 kept, cut = res[best], []
 print("ЛУЧШИЙ", best)

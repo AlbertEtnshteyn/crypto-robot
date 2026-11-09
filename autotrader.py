@@ -72,6 +72,7 @@ MARKETS = [
 ]
 MARKET_N = {"top20": 20, "top50": 50, "top100": 100, "all": None}
 MID_VOL_MULT = 3.0            # «Движение дня»: всплеск объёма — 5-мин свеча по ходу тренда с оборотом ≥ ×3 медианы за сутки до тренда
+MID_STOP_MODE = "24h"         # стоп «Движения дня»: "24h" — за лоем 24 ч, "trend" — за лоем с начала тренда, "1h" — за лоем последнего часа
 MID_RR = 1.5                  # «Движение дня»: тейк минимум в 1,5 раза дальше стопа
 MID_RR_MODE = "take"          # "take" — тейк ставится от риска, если хай ближе; "skip" — такой вход пропускается
 HIST_DAYS = 3                 # сколько календарных дней истории грузить для EMA20 и медианы объёма
@@ -1129,9 +1130,13 @@ class AutoTrader:
                              f"было движение на объёме — жду первого отката к середине EMA10/EMA20 ({mid:.4g}).")
                     self._save()
                 if armed and hit is None and (px - mid) * sd <= 0:
-                    d24 = [x for x in self._bars5(tk, now) if x["t"] >= now.replace(tzinfo=None) - timedelta(hours=24)]
-                    lo24 = min([x["l"] for x in d24] or [lv[1]])
-                    hi24 = max([x["h"] for x in d24] or [lv[2]])
+                    b5_ = self._bars5(tk, now)
+                    d24 = [x for x in b5_ if x["t"] >= now.replace(tzinfo=None) - timedelta(hours=24)]
+                    seg = (d24 if MID_STOP_MODE == "24h" else [x for x in b5_ if x["t"] >= T0] if MID_STOP_MODE == "trend"
+                           else b5_[-12:]) or b5_[-12:]
+                    lo_s = (min([x["l"] for x in seg] or [lv[1]])) if sd > 0 else (max([x["h"] for x in seg] or [lv[2]]))
+                    lo24 = lo_s if sd > 0 else min([x["l"] for x in d24] or [lv[1]])
+                    hi24 = max([x["h"] for x in d24] or [lv[2]]) if sd > 0 else lo_s
                     hit, side = (tf, (mid, lo24, hi24), key, T), sd
             if not hit:
                 continue
@@ -1144,10 +1149,11 @@ class AutoTrader:
                 continue                                  # режим торговли не разрешает эту сторону при нынешнем индексе
             tf, (mid, lo, hi) = hit
             if side > 0:
-                stop, take = lo * (1 - MID_STOP_BUF), hi
+                stop, take = min(lo * (1 - MID_STOP_BUF), px * (1 - MID_MIN_STOP)), hi
             else:
-                stop, take = hi * (1 + MID_STOP_BUF), lo
-            stop_n = "лой за 24 ч" if side > 0 else "хай за 24 ч"
+                stop, take = max(hi * (1 + MID_STOP_BUF), px * (1 + MID_MIN_STOP)), lo
+            stop_n = {"24h": "за 24 ч", "trend": "с начала тренда", "1h": "за последний час"}[MID_STOP_MODE]
+            stop_n = ("лой " if side > 0 else "хай ") + stop_n
             prev = self.st.setdefault("mid_last", {}).get(tk)
             if m.get("multi") and m.get("swing_stop") and prev:
                 sw = self._swing_level(tk, now, prev, side)

@@ -677,7 +677,7 @@ def _bt_first_touch(rows, tf):
     """5-мин свечи, на которых случился ПЕРВЫЙ откат к середине EMA10/EMA20 в тренде: {строка: (середина, сторона)}.
     После начала тренда нужно движение на объёме (5-мин свеча по ходу тренда с оборотом ≥ ×3 медианы за сутки до тренда),
     потом закрытие за серединой по ходу тренда, потом возврат к середине — это и есть вход."""
-    out, armed, used, spike, med = {}, set(), set(), set(), {}
+    out, armed, used, spike, med, st0 = {}, set(), set(), set(), {}, {}
     vol = [r[5] if len(r) > 5 else 0 for r in rows]
     for i, v in enumerate(_bt_cross(rows, tf)):
         if v is None:
@@ -685,13 +685,14 @@ def _bt_first_touch(rows, tf):
         md, s_, cid = v
         if cid in used:
             continue
+        st0.setdefault(cid, i)                         # строка начала тренда
         if cid not in med:
             prev = sorted(vol[max(0, i - 288):i])
             med[cid] = prev[len(prev) // 2] if len(prev) >= 24 else 0
         o, h, l, c = rows[i][1], rows[i][2], rows[i][3], rows[i][4]
         if cid in armed and ((l <= md) if s_ > 0 else (h >= md)):
             used.add(cid)
-            out[i] = (md, s_)
+            out[i] = (md, s_, st0[cid])
             continue
         if cid not in spike and med[cid] > 0 and vol[i] >= at.MID_VOL_MULT * med[cid] and (c - o) * s_ > 0:
             spike.add(cid)
@@ -764,10 +765,10 @@ def bt_run(data, m, imoex=None):
                 for tf in m["tfs"]:
                     v = touch[tf].get(r)
                     if v and hit is None and (can_l if v[1] > 0 else can_s):
-                        hit = (tf, v[0], v[1])
+                        hit = (tf, v[0], v[1], v[2])
                 if r <= busy or hit is None:
                     r += 1; continue
-                tf, md, sd = hit
+                tf, md, sd, t_start = hit
                 if not mid_allowed(m.get("modes", ["long"]), sd, (imoex.get(t) if imoex is not None else None)):
                     r += 1; continue
                 px = (o if o <= md else md) if sd > 0 else (o if o >= md else md)
@@ -776,10 +777,15 @@ def bt_run(data, m, imoex=None):
                 if m.get("min_vol") and sum(x[5] if len(x) > 5 else 0 for x in rows[day_from:r]) < m["min_vol"]:
                     r += 1; continue                        # объём торгов сегодня к моменту входа меньше заданного
                 lo_d = min(x[3] for x in rows[max(0, r - 288):r]); hi_d = max(x[2] for x in rows[max(0, r - 288):r])   # лой/хай за 24 ч
+                smode = m.get("stop_mode", at.MID_STOP_MODE)
+                seg = rows[t_start:r] if smode == "trend" else rows[max(0, r - 12):r] if smode == "1h" else rows[max(0, r - 288):r]
+                seg = seg or rows[max(0, r - 12):r]
                 if sd > 0:
-                    stop, take = lo_d * (1 - at.MID_STOP_BUF), hi_d
+                    stop, take = min(x[3] for x in seg) * (1 - at.MID_STOP_BUF), hi_d
+                    stop = min(stop, px * (1 - at.MID_MIN_STOP))     # стоп не ближе 0,3% к цене
                 else:
-                    stop, take = hi_d * (1 + at.MID_STOP_BUF), lo_d
+                    stop, take = max(x[2] for x in seg) * (1 + at.MID_STOP_BUF), lo_d
+                    stop = max(stop, px * (1 + at.MID_MIN_STOP))
                 if m.get("multi") and m.get("swing_stop") and prev_in is not None and prev_in < r:
                     sw = min(x[3] for x in rows[prev_in:r]) if sd > 0 else max(x[2] for x in rows[prev_in:r])
                     if (px - sw) * sd > 0 and abs(px / sw - 1) >= at.MID_MIN_STOP:   # повторный вход — стоп за лоем предыдущего движения
