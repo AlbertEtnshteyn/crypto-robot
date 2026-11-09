@@ -25,12 +25,12 @@ for tk in TK:
         print(tk, "нет истории", e); continue
     if rows:
         data[tk] = rows
-VARS = [(tf, sm) for tf in (5, 60) for sm in ("24h", "trend", "1h")]
+VARS = [(tf, sm) for tf in (5, 15, 60) for sm in ("24h", "trend", "1h")]
 SMN = {"24h": "стоп за лоем 24 ч", "trend": "стоп за лоем с начала тренда", "1h": "стоп за лоем последнего часа"}
 res = {}
 for tf, mode in VARS:
     s["mid_tfs"] = [tf]
-    m = rc.mid_cfg(s); m.update(cost=2 * 0.0005 + rc.BT_SLIP, fund={}, rr=1.5, rr_mode="take", stop_mode=mode, no_time_exit=True)
+    m = rc.mid_cfg(s); m.update(cost=2 * 0.0005 + rc.BT_SLIP, fund={}, stop_mode=mode, no_time_exit=True, trail_mode=True, act=0.01, trail=0.01)
     tr = []
     for tk, rows in data.items():
         tr += [t for t in rc.bt_run({tk: rows}, m, None) if t["date"] >= str(start)]
@@ -38,11 +38,11 @@ for tf, mode in VARS:
     res[(tf, mode)] = tr
     import statistics as _st
     mdd = min((sum(t["pct"] for t in tr[:k + 1]) for k in range(len(tr))), default=0)
-    stp = _st.median([abs(t["entry"] / t["stop"] - 1) * 100 for t in tr]) if tr else 0
+    stp = _st.median([abs(t["entry"] / t.get("stop0", t["stop"]) - 1) * 100 for t in tr]) if tr else 0
     months = {}
     for t in tr:
         months[t["date"][:7]] = months.get(t["date"][:7], 0) + t["pct"]
-    print(f"ВАРИАНТ ТФ {tf} мин, {SMN[mode]}, тейк 1:1,5: сделок {len(tr)}, стоп обычно {stp:.2f}%, "
+    print(f"ВАРИАНТ ТФ {tf} мин, {SMN[mode]}, без тейка (+1% → б/у, трейлинг 1%): сделок {len(tr)}, стоп обычно {stp:.2f}%, "
           f"по месяцам {', '.join(f'{k} {v:+.0f}%' for k, v in sorted(months.items()))}, "
           f"в плюсе {sum(1 for t in tr if t['pct'] > 0) / max(1, len(tr)) * 100:.0f}%, средняя {sum(t['pct'] for t in tr) / max(1, len(tr)):+.3f}%, "
           f"сумма {sum(t['pct'] for t in tr):+.1f}%, профит-фактор {pos / neg if neg else 0:.2f}", flush=True)
@@ -102,8 +102,10 @@ def draw(t, kind, n):
     ax.annotate(f"{'сигнал ' if rej else 'ВХОД '}{'лонг' if sd > 0 else 'шорт'}{' — НЕ ВОШЁЛ' if rej else ''}\n{t['entry']:.6g} · {msk(te)}", (ie, t["entry"]), (12, -38 if sd > 0 else 26),
                 textcoords="offset points", color="white", fontsize=9, fontweight="bold", arrowprops=dict(arrowstyle="-", color="#888"))
     if kind == "вход":
-        ax.hlines([t["stop"]], ie, ix, colors=DN, linestyles="--", lw=1.2); ax.text(ie - 1, t["stop"], f"стоп {t['stop']:.6g}", color=DN, fontsize=8, ha="right", va="center")
-        ax.hlines([t["take"]], ie, ix, colors=UP, linestyles="--", lw=1.2); ax.text(ie - 1, t["take"], f"тейк {t['take']:.6g}", color=UP, fontsize=8, ha="right", va="center")
+        s0 = t.get("stop0", t["stop"])
+        ax.hlines([s0], ie, ix, colors=DN, linestyles="--", lw=1.2); ax.text(ie - 1, s0, f"стоп на входе {s0:.6g}", color=DN, fontsize=8, ha="right", va="center")
+        if abs(t["take"] / t["entry"] - 1) < 0.5:
+            ax.hlines([t["take"]], ie, ix, colors=UP, linestyles="--", lw=1.2); ax.text(ie - 1, t["take"], f"тейк {t['take']:.6g}", color=UP, fontsize=8, ha="right", va="center")
         ax.scatter([ix], [t["exit"]], marker="o", s=140, color=UP if ok else DN, edgecolor="white", zorder=5)
         ax.annotate(f"ВЫХОД: {t['reason']} {t['pct']:+.2f}%\n{t['exit']:.6g} · {msk(x)}", (ix, t["exit"]), (12, 22 if sd > 0 else -40),
                     textcoords="offset points", color=UP if ok else DN, fontsize=9, fontweight="bold", arrowprops=dict(arrowstyle="-", color="#888"))
@@ -111,7 +113,7 @@ def draw(t, kind, n):
              f"{'выше' if s200[ie-1] and t['entry'] > s200[ie-1] else 'ниже'} SMA200")
     tfn = {5: "5 мин", 15: "15 мин", 60: "1 час"}[tf]
     if kind == "вход":
-        title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} · итог {t['pct']:+.2f}% ({t['reason']}) · первый откат к середине EMA10/EMA20 после движения на объёме"
+        title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} · итог {t['pct']:+.2f}% ({t['reason']}) · без тейка: +1% → б/у, трейлинг 1%"
         col = UP if ok else DN
     else:
         title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} НЕ ОТКРЫТ — против тренда"
@@ -129,7 +131,7 @@ def draw(t, kind, n):
 
 # выбор: разные монеты, лонги и шорты, плюс и минус
 def pick(lst, k):
-    lst = sorted(lst, key=lambda t: (t["date"], t["time"]), reverse=True)
+    lst = sorted(lst, key=lambda t: (t["reason"] not in ("открыта", "конец данных"), t["date"], t["time"]), reverse=True)
     out, seen = [], set()
     for want in ((1, True), (-1, True), (1, False), (-1, False)) * 6:
         for t in lst:

@@ -73,6 +73,8 @@ MARKETS = [
 MARKET_N = {"top20": 20, "top50": 50, "top100": 100, "all": None}
 MID_VOL_MULT = 3.0            # «Движение дня»: всплеск объёма — 5-мин свеча по ходу тренда с оборотом ≥ ×3 медианы за сутки до тренда
 MID_STOP_MODE = "24h"         # стоп «Движения дня»: "24h" — за лоем 24 ч, "trend" — за лоем с начала тренда, "1h" — за лоем последнего часа
+MID_TRAIL_MODE = True         # «Движение дня»: без тейка — после +1% стоп в безубыток, дальше трейлинг-стоп (mid_trail, по умолчанию 1%)
+MID_TRAIL_ACT = 0.01          # с какой прибыли включается безубыток и трейлинг
 MID_RR = 1.5                  # «Движение дня»: тейк минимум в 1,5 раза дальше стопа
 MID_RR_MODE = "take"          # "take" — тейк ставится от риска, если хай ближе; "skip" — такой вход пропускается
 HIST_DAYS = 3                 # сколько календарных дней истории грузить для EMA20 и медианы объёма
@@ -1165,7 +1167,9 @@ class AutoTrader:
             what = "ПОКУПКА" if side > 0 else "ШОРТ"
             hi_n_ = ""
             risk = (px - stop) * side
-            if risk > 0 and (take - px) * side < MID_RR * risk:      # тейк ближе, чем 1,5 стопа
+            if MID_TRAIL_MODE:                               # тейка нет — выход по безубытку и трейлинг-стопу
+                take, hi_n_ = px * (1 + side * 10), "нет — после +1% б/у и трейлинг"
+            elif risk > 0 and (take - px) * side < MID_RR * risk:      # тейк ближе, чем 1,5 стопа
                 if MID_RR_MODE == "skip":
                     self.log(f"«Движение дня»: {tk} — до тейка {abs(take / px - 1) * 100:.2f}% меньше чем {MID_RR:g} × стоп "
                              f"{risk / px * 100:.2f}% — не вхожу.")
@@ -1215,7 +1219,7 @@ class AutoTrader:
             lo_n, hi_n = ("лой", "хай") if side > 0 else ("хай", "лой")
             self.log(f"«Движение дня»: {tk} дошла до середины EMA10/EMA20 на {self._tf_name(tf)} ({mid:.4g}), цена {px:.4g} — {what}"
                      + (f" №{n} за день" if n > 1 else "") + " (на " + f"{alloc:,.0f}".replace(",", " ") + " USDT" + (f", плечо ×{lev:g}" if lev != 1 else "") + ")" + f", стоп {stop:.4g} ({stop_n}), "
-                     f"тейк {take:.4g} ({hi_n_ if hi_n_ else hi_n + ' за 24 ч'}), без выхода по времени.")
+                     + (f"тейк нет: после +{MID_TRAIL_ACT * 100:g}% стоп в б/у, дальше трейлинг-стоп" if MID_TRAIL_MODE else f"тейк {take:.4g} ({hi_n_ if hi_n_ else hi_n + ' за 24 ч'})") + ", без выхода по времени.")
             self._open(tk, side, alloc, strat="mid", stop_level=stop, t1=take, exit_min=m["exit"], tf=tf)
 
     # ------------------------------------------------------------------ сканирование
@@ -1773,7 +1777,9 @@ class AutoTrader:
         pos.update(day_ex)
         if strat == "mid":
             mm = self._mid()
-            if mm.get("half"):                        # тейк на хае дня — часть, затем б/у и трейлинг-стоп
+            if MID_TRAIL_MODE:                        # без тейка: +1% → стоп в б/у, дальше трейлинг-стоп
+                pos.update(mtrail_only=True, mtrail=mm.get("trail", 0.01), mact=MID_TRAIL_ACT, take=None, best=entry)
+            elif mm.get("half"):                      # тейк на хае дня — часть, затем б/у и трейлинг-стоп
                 pos.update(mhalf=mm["half"], mtrail=mm.get("trail", 0.01))
         if day_ex.get("dtp"):                         # уровень тейка «движения дня» — для таблиц и графика
             pos["take"] = entry * (1 + side * day_ex["dtp"])
@@ -1791,7 +1797,8 @@ class AutoTrader:
         if strat == "mid":
             lo_n, hi_n = ("лой", "хай") if side > 0 else ("хай", "лой")
             self.log(f"  {tk}: {'КУПЛЕНО' if side > 0 else 'ПРОДАНО (шорт)'} {lots * per_lot:g} монет (" + f"{lots * per_lot * entry:,.2f}".replace(",", " ")
-                     + f" USDT) по ~{entry:.6g}, стоп {pos['stop']:.6g}, тейк {pos['take']:.6g}, без выхода по времени — до стопа или тейка")
+                     + f" USDT) по ~{entry:.6g}, стоп {pos['stop']:.6g}, " + (f"тейк {pos['take']:.6g}" if pos.get("take") else f"тейка нет — после +{MID_TRAIL_ACT * 100:g}% б/у и трейлинг")
+                     + ", без выхода по времени")
             self.on_event("open", dict(pos))
             self._push()
             return
@@ -1827,7 +1834,9 @@ class AutoTrader:
                 continue
             s = p["side"]
             if p.get("strat") == "mid":
-                if p.get("mhalf"):
+                if p.get("mtrail_only"):
+                    self._mid_trail(p, px, s)
+                elif p.get("mhalf"):
                     self._mid_half_exits(p, px, s)
                 elif (px - p["stop"]) * s <= 0:
                     self._close(p, px, "стоп (лой дня)" if s > 0 else "стоп (хай дня)")
@@ -2012,6 +2021,28 @@ class AutoTrader:
                          "gross": round(gross, 4), "fee": round(fee, 4), "funding": round(fund, 4)}])
         self.on_event("close", {"ticker": p["ticker"], "why": why, "result": res, "lots": lots, "pnl": pnl})
         self._push()
+
+    def _mid_trail(self, p, px, s):
+        """«Движение дня» без тейка: прибыль дошла до +1% → стоп в безубыток, дальше трейлинг-стоп на mtrail от лучшей цены."""
+        e = p["entry"]
+        if (px - p.get("best", e)) * s > 0:
+            p["best"] = px
+        best = p.get("best", e)
+        if (best / e - 1) * s >= p.get("mact", MID_TRAIL_ACT):
+            ns = best * (1 - s * p.get("mtrail", 0.01))
+            if (e - ns) * s > 0:
+                ns = e
+            if (ns - p["stop"]) * s > 0:
+                if not p.get("dtook"):
+                    p.update(dtook=True, armed=True, stage=2)
+                    self.log(f"  {p['ticker']}: прибыль {p.get('mact', MID_TRAIL_ACT) * 100:g}% — стоп в безубыток, дальше трейлинг-стоп "
+                             f"{p.get('mtrail', 0.01) * 100:g}% от лучшей цены")
+                p["stop"] = ns
+                self._save()
+                self._sync_ex_stops()
+        if (px - p["stop"]) * s <= 0:
+            why = "стоп" if not p.get("dtook") else ("б/у" if abs(p["stop"] - e) < 1e-12 else "трейлинг-стоп")
+            self._close(p, px, why)
 
     def _mid_half_exits(self, p, px, s):
         """«Движение дня», тейк частями: на хае дня (для шорта — на лое) закрыть mhalf позиции, стоп сразу в безубыток,

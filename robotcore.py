@@ -791,7 +791,9 @@ def bt_run(data, m, imoex=None):
                     if (px - sw) * sd > 0 and abs(px / sw - 1) >= at.MID_MIN_STOP:   # повторный вход — стоп за лоем предыдущего движения
                         stop = sw * (1 - sd * at.MID_STOP_BUF)
                 risk = (px - stop) * sd
-                rr = m.get("rr", at.MID_RR)
+                rr = 0 if m.get("trail_mode", at.MID_TRAIL_MODE) else m.get("rr", at.MID_RR)
+                if m.get("trail_mode", at.MID_TRAIL_MODE):
+                    take = px * (1 + sd * 10)                  # тейка нет — выход только по стопу/трейлингу
                 if rr and risk > 0 and (take - px) * sd < rr * risk:          # тейк ближе, чем 1,5 стопа
                     if m.get("rr_mode", at.MID_RR_MODE) == "skip":
                         r += 1; continue
@@ -806,10 +808,31 @@ def bt_run(data, m, imoex=None):
                 hit_stop = lambda k_: (rows[k_][3] <= stop) if sd > 0 else (rows[k_][2] >= stop)
                 hit_take = lambda k_: (rows[k_][2] >= take) if sd > 0 else (rows[k_][3] <= take)
                 res, why, xr = None, "", r
+                stop0 = stop                                   # стоп на входе (дальше его может подтянуть трейлинг)
                 half, trl = m.get("half", 0.0), m.get("trail", 0.01)
                 took, part_res, best, took_k = False, 0.0, px, None
                 if hit_stop(r):
                     res, why = ret(stop), "стоп"
+                elif m.get("trail_mode", at.MID_TRAIL_MODE):
+                    # без тейка: после +1% стоп в безубыток, дальше трейлинг-стоп от лучшей цены — пока рост идёт, позиция живёт
+                    act, on, k = m.get("act", at.MID_TRAIL_ACT), False, r + 1
+                    while k < len(rows):
+                        if hit_stop(k):
+                            fill = min(rows[k][1], stop) if sd > 0 else max(rows[k][1], stop)
+                            res, xr = ret(fill), k
+                            why = "стоп" if not on else ("б/у" if abs(stop - px) < 1e-12 else "трейлинг")
+                            break
+                        best = max(best, rows[k][2]) if sd > 0 else min(best, rows[k][3])
+                        if (best / px - 1) * sd >= act:
+                            on = True
+                            ns = best * (1 - sd * trl)
+                            if (px - ns) * sd > 0:
+                                ns = px                            # не хуже безубытка
+                            if (ns - stop) * sd > 0:
+                                stop = ns
+                        k += 1
+                    if res is None:
+                        res, why, xr = ret(rows[-1][4]), "открыта", len(rows) - 1
                 else:
                     k = r + 1
                     while k < len(rows):
@@ -867,7 +890,7 @@ def bt_run(data, m, imoex=None):
                 busy = xr
                 trades.append({"date": t.strftime("%Y-%m-%d"), "time": t.strftime("%H:%M"), "ticker": tk, "tf": tf, "side": sd,
                                "liq": round(liq), "cap": round(liq * m["liq"]) if m.get("liq") and liq else None,
-                               "entry": round(px, 6), "stop": round(stop, 6), "take": round(take, 6), "exit": round(xp, 6),
+                               "entry": round(px, 6), "stop": round(stop, 6), "stop0": round(stop0, 6), "take": round(take, 6), "exit": round(xp, 6),
                                "exit_time": rows[xr][0].strftime("%d.%m %H:%M"), "reason": why,
                                "gross": round(res * 100, 3), "fee_pct": round(cost * 100, 4), "fund_pct": round(fund * 100, 4),
                                "pct": round((res - cost + fund) * 100, 3)})
