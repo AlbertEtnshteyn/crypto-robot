@@ -1,0 +1,20 @@
+name: Быстрый вход по всплеску объёма
+
+on:
+  workflow_dispatch:
+    inputs:
+      args:
+        description: "дней, месяцев на проверку"
+        default: "365 4"
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python tools/spike_bt.py ${{ inputs.args }}
