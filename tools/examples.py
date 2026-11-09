@@ -37,12 +37,13 @@ rc._bt_trend = real_trend
 
 def resample(rows, tf):
     out, cur = [], None
-    for t, o, h, l, c, *_ in rows:
+    for t, o, h, l, c, *rest in rows:
+        v = rest[0] if rest else 0
         k = t.replace(minute=t.minute - t.minute % tf) if tf < 60 else t.replace(minute=0)
         if cur and cur[0] == k:
-            cur[2] = max(cur[2], h); cur[3] = min(cur[3], l); cur[4] = c
+            cur[2] = max(cur[2], h); cur[3] = min(cur[3], l); cur[4] = c; cur[5] += v
         else:
-            cur = [k, o, h, l, c]; out.append(cur)
+            cur = [k, o, h, l, c, v]; out.append(cur)
     return out
 
 def ema(v, n):
@@ -66,10 +67,12 @@ def draw(t, kind, n):
     for sp_ in ax.spines.values(): sp_.set_color("#2a2e39")
     ax.tick_params(colors="#787b86", labelsize=8)
     for i in range(a, z):
-        _, o, h, l, c = B[i]; col = UP if c >= o else DN
+        _, o, h, l, c, _v = B[i]; col = UP if c >= o else DN
         ax.plot([i, i], [l, h], color=col, lw=.8)
         ax.add_patch(Rectangle((i - .35, min(o, c)), .7, max(abs(c - o), (h - l) * .02 or 1e-12), color=col))
     xs = list(range(a, z))
+    av = ax.twinx(); av.set_ylim(0, max(b[5] for b in B[a:z]) * 4 or 1); av.axis("off")
+    av.bar(xs, [B[i][5] for i in xs], width=.7, color=[(UP if B[i][4] >= B[i][1] else DN) for i in xs], alpha=.45)
     ax.plot(xs, e10[a:z], color="#e8e8e8", lw=1.1, label="EMA 10")
     ax.plot(xs, e20[a:z], color="#2962ff", lw=1.4, label="EMA 20")
     ax.plot(xs, e200[a:z], color="#ef5350", lw=1.4, label="EMA 200")
@@ -91,7 +94,7 @@ def draw(t, kind, n):
              f"{'выше' if s200[ie-1] and t['entry'] > s200[ie-1] else 'ниже'} SMA200")
     tfn = {5: "5 мин", 15: "15 мин", 60: "1 час"}[tf]
     if kind == "вход":
-        title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} · итог {t['pct']:+.2f}% ({t['reason']})"
+        title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} · итог {t['pct']:+.2f}% ({t['reason']}) · первый откат к середине EMA10/EMA20 после движения на объёме"
         col = UP if ok else DN
     else:
         title = f"{n}. {t['ticker']} · {tfn} · {'ЛОНГ' if sd > 0 else 'ШОРТ'} НЕ ОТКРЫТ — против тренда"

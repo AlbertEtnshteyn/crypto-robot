@@ -71,6 +71,7 @@ MARKETS = [
     ("all", "Все USDT-фьючерсы"),
 ]
 MARKET_N = {"top20": 20, "top50": 50, "top100": 100, "all": None}
+MID_VOL_MULT = 3.0            # «Движение дня»: всплеск объёма — 5-мин свеча по ходу тренда с оборотом ≥ ×3 медианы за сутки до тренда
 HIST_DAYS = 3                 # сколько календарных дней истории грузить для EMA20 и медианы объёма
 
 
@@ -996,7 +997,9 @@ class AutoTrader:
         if not b5 or b5[0]["t"] > T:
             return sd, mids[-1], True, True, T            # тренд старше загруженных 5-мин свечей — первый откат уже был
         closes = [r["t"] + timedelta(minutes=tf) for r in rows]
-        armed, j = False, k0
+        before = [x.get("val", 0) for x in b5 if x["t"] < T][-288:]
+        med = _median(before) if len(before) >= 24 else 0
+        armed, spike, j = False, False, k0
         for x in b5:
             if x["t"] < T:
                 continue
@@ -1005,7 +1008,9 @@ class AutoTrader:
             md = mids[j]
             if armed and ((x["l"] <= md) if sd > 0 else (x["h"] >= md)):
                 return sd, mids[-1], True, True, T
-            if (x["c"] - md) * sd > 0:
+            if not spike and med > 0 and x.get("val", 0) >= MID_VOL_MULT * med and (x["c"] - x["o"]) * sd > 0:
+                spike = True                         # движение на объёме — с этого момента ловим откат
+            if spike and (x["c"] - md) * sd > 0:
                 armed = True
         return sd, mids[-1], armed, False, T
 
@@ -1118,11 +1123,14 @@ class AutoTrader:
                 if armed and ann.get(key) != T:
                     ann[key] = T
                     self.log(f"«Движение дня»: {tk} — тренд {'вверх' if sd > 0 else 'вниз'} на {self._tf_name(tf)} "
-                             f"(EMA10 {'выше' if sd > 0 else 'ниже'} EMA20, цена {'выше' if sd > 0 else 'ниже'} EMA200 и SMA200) — "
-                             f"жду первого отката к середине EMA10/EMA20 ({mid:.4g}).")
+                             f"(EMA10 {'выше' if sd > 0 else 'ниже'} EMA20, цена {'выше' if sd > 0 else 'ниже'} EMA200 и SMA200), "
+                             f"было движение на объёме — жду первого отката к середине EMA10/EMA20 ({mid:.4g}).")
                     self._save()
                 if armed and hit is None and (px - mid) * sd <= 0:
-                    hit, side = (tf, (mid, lv[1], lv[2]), key, T), sd
+                    d24 = [x for x in self._bars5(tk, now) if x["t"] >= now.replace(tzinfo=None) - timedelta(hours=24)]
+                    lo24 = min([x["l"] for x in d24] or [lv[1]])
+                    hi24 = max([x["h"] for x in d24] or [lv[2]])
+                    hit, side = (tf, (mid, lo24, hi24), key, T), sd
             if not hit:
                 continue
             tf, lvv, key, T = hit
@@ -1137,7 +1145,7 @@ class AutoTrader:
                 stop, take = lo * (1 - MID_STOP_BUF), hi
             else:
                 stop, take = hi * (1 + MID_STOP_BUF), lo
-            stop_n = "лой дня" if side > 0 else "хай дня"
+            stop_n = "лой за 24 ч" if side > 0 else "хай за 24 ч"
             prev = self.st.setdefault("mid_last", {}).get(tk)
             if m.get("multi") and m.get("swing_stop") and prev:
                 sw = self._swing_level(tk, now, prev, side)
@@ -1190,7 +1198,7 @@ class AutoTrader:
             lo_n, hi_n = ("лой", "хай") if side > 0 else ("хай", "лой")
             self.log(f"«Движение дня»: {tk} дошла до середины EMA10/EMA20 на {self._tf_name(tf)} ({mid:.4g}), цена {px:.4g} — {what}"
                      + (f" №{n} за день" if n > 1 else "") + " (на " + f"{alloc:,.0f}".replace(",", " ") + " USDT" + (f", плечо ×{lev:g}" if lev != 1 else "") + ")" + f", стоп {stop:.4g} ({stop_n}), "
-                     f"тейк {take:.4g} ({hi_n} дня), выход {hm(m['exit'])}.")
+                     f"тейк {take:.4g} ({hi_n} за 24 ч), выход {hm(m['exit'])}.")
             self._open(tk, side, alloc, strat="mid", stop_level=stop, t1=take, exit_min=m["exit"], tf=tf)
 
     # ------------------------------------------------------------------ сканирование

@@ -674,20 +674,28 @@ def _bt_cross(rows, tf):
 
 
 def _bt_first_touch(rows, tf):
-    """5-мин свечи, на которых случился ПЕРВЫЙ откат к середине EMA10/EMA20 после пересечения EMA10 и EMA20:
-    {строка: (середина, сторона)}. Сначала цена должна закрыться за серединой по ходу тренда, затем вернуться к ней."""
-    out, armed, used = {}, set(), set()
+    """5-мин свечи, на которых случился ПЕРВЫЙ откат к середине EMA10/EMA20 в тренде: {строка: (середина, сторона)}.
+    После начала тренда нужно движение на объёме (5-мин свеча по ходу тренда с оборотом ≥ ×3 медианы за сутки до тренда),
+    потом закрытие за серединой по ходу тренда, потом возврат к середине — это и есть вход."""
+    out, armed, used, spike, med = {}, set(), set(), set(), {}
+    vol = [r[5] if len(r) > 5 else 0 for r in rows]
     for i, v in enumerate(_bt_cross(rows, tf)):
         if v is None:
             continue
         md, s_, cid = v
         if cid in used:
             continue
-        h, l, c = rows[i][2], rows[i][3], rows[i][4]
+        if cid not in med:
+            prev = sorted(vol[max(0, i - 288):i])
+            med[cid] = prev[len(prev) // 2] if len(prev) >= 24 else 0
+        o, h, l, c = rows[i][1], rows[i][2], rows[i][3], rows[i][4]
         if cid in armed and ((l <= md) if s_ > 0 else (h >= md)):
             used.add(cid)
             out[i] = (md, s_)
-        elif (c - md) * s_ > 0:
+            continue
+        if cid not in spike and med[cid] > 0 and vol[i] >= at.MID_VOL_MULT * med[cid] and (c - o) * s_ > 0:
+            spike.add(cid)
+        if cid in spike and (c - md) * s_ > 0:
             armed.add(cid)
     return out
 
@@ -767,7 +775,7 @@ def bt_run(data, m, imoex=None):
                     r += 1; continue
                 if m.get("min_vol") and sum(x[5] if len(x) > 5 else 0 for x in rows[day_from:r]) < m["min_vol"]:
                     r += 1; continue                        # объём торгов сегодня к моменту входа меньше заданного
-                lo_d = min(x[3] for x in rows[day_from:r]); hi_d = max(x[2] for x in rows[day_from:r])
+                lo_d = min(x[3] for x in rows[max(0, r - 288):r]); hi_d = max(x[2] for x in rows[max(0, r - 288):r])   # лой/хай за 24 ч
                 if sd > 0:
                     stop, take = lo_d * (1 - at.MID_STOP_BUF), hi_d
                 else:
