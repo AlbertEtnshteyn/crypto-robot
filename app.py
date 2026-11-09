@@ -597,28 +597,26 @@ class App(tk.Tk):
         self.v_mtrail = tk.StringVar(value=f"{float(self.s.get('mid_trail', 1.0) or 1.0):g}")
         self.v_mcdays = tk.StringVar(value=str(int(self.s.get("mid_carry_days", 0) or 0)))
         ent = lambda var, w: (lambda fr: ttk.Entry(fr, textvariable=var, width=w))
-        b2 = box("Стратегия «Движение дня» — покупка на середине между EMA10 и EMA20")
-        row(b2, "Монета ушла от начала дня (03:00 МСК) на, %:", ent(self.v_mthr, 5), "EMA по графикам:",
-            *[ck(n, self.v_mtfs[k]) for k, n in self.MTF.items()])
+        self.MSTOP = {"24h": "за лоем за 24 часа (шорт — за хаем)", "trend": "за лоем с начала тренда (шорт — за хаем)",
+                      "1h": "за лоем последнего часа (шорт — за хаем)"}
+        self.v_mstop = tk.StringVar(value=self.MSTOP.get(self.s.get("mid_stop", "24h"), self.MSTOP["24h"]))
+        self.v_mact = tk.StringVar(value=f"{float(self.s.get('mid_act', 1.0) or 1.0):g}")
+        self.v_mvm = tk.StringVar(value=f"{float(self.s.get('mid_vol_mult', 3.0) or 3.0):g}")
+        b2 = box("Стратегия «Движение дня» — первый откат в тренде")
+        row(b2, ("hint", "Тренд вверх: EMA10 выше EMA20, цена выше EMA200 и SMA200 (тренд вниз — наоборот) → по ходу тренда всплеск объёма → "
+                         "робот ловит ПЕРВЫЙ откат к середине между EMA10 и EMA20 и входит. Повторные откаты того же тренда пропускаются. "
+                         "Входы круглосуточно, порога от начала дня нет."))
+        row(b2, "Тренд и EMA по графикам:", *[ck(n, self.v_mtfs[k]) for k, n in self.MTF.items()])
         markets(b2, self.v_dmk)
-        row(b2, "Движение считать:", cb(self.v_mref, list(self.MREF.values()), 40),
-            ck("несколько входов по монете за день", self.v_mmulti),
-            ck("2-й и следующие входы — стоп за лоем предыдущего движения", self.v_mswing))
-        row(b2, ("hint", "повторный вход: стоп — за минимумом цены (для шорта — максимумом) с прошлого входа по этой монете, "
-                         "а не за лоем дня; если он ближе 0,3% к цене — стоп за лоем дня"))
+        row(b2, "Всплеск объёма: 5-мин свеча по ходу тренда с оборотом ≥", ent(self.v_mvm, 4), "× медианы за сутки до начала тренда")
         row(b2, "Режим торговли (можно несколько):", *[ck(n, self.v_mmodes[k]) for k, n in rc.MID_MODES[:2]])
         row(b2, "", *[ck(n, self.v_mmodes[k]) for k, n in rc.MID_MODES[2:]])
-        row(b2, ("hint", "«индекс» — биткоин от начала дня. Шорт — зеркально: монета упала на порог → шорт на середине EMA, стоп за хаем дня, тейк на лое дня."))
-        row(b2, ck("Покупки круглосуточно", self.v_mallday), "   иначе покупки с", ent(self.v_mfrom, 6), "до", ent(self.v_mto, 6),
-            "   выход в", ent(self.v_mexit, 6),
-            ("hint", "время по Москве, ЧЧ:ММ; торговый день — с 03:00 до 03:00 МСК. Вошли после времени выхода — выход на следующий день"))
+        row(b2, ("hint", "«по BTC» — биткоин от начала дня (03:00 МСК) растёт → лонги, падает → шорты."))
+        row(b2, "Стоп:", cb(self.v_mstop, list(self.MSTOP.values()), 40), ck("несколько входов по монете за день", self.v_mmulti))
+        row(b2, ("hint", "стоп не ближе 0,3% к цене входа"))
+        row(b2, "Тейка нет. При прибыли, %:", ent(self.v_mact, 4), "→ стоп в безубыток, дальше трейлинг-стоп, % от лучшей цены:", ent(self.v_mtrail, 4))
+        row(b2, ("hint", "пока рост идёт — позиция живёт. Выхода по времени нет: только стоп, безубыток или трейлинг-стоп"))
         row(b2, ck("Страховочный стоп на бирже (срабатывает, даже если сервер или связь пропали)", self.v_exstop))
-        row(b2, "Тейк на хае дня:", cb(self.v_mtake, list(self.MTAKE.values()), 44), "часть, %:", ent(self.v_mtpart, 4),
-            "трейлинг, % от лучшей цены:", ent(self.v_mtrail, 4))
-        row(b2, ("hint", "для шорта — на лое дня. После тейка части стоп сразу в цену входа, затем подтягивается за ценой "
-                         "на заданный % от лучшей цены; остаток закрывается по трейлингу, стопу или по времени"))
-        row(b2, "Во время выхода:", cb(self.v_mcarry, list(self.MCARRY.values()), 36), "не дольше, дней:", ent(self.v_mcdays, 4),
-            ("hint", "0 — без ограничения; стоп и тейк остаются; у каждой позиции можно выбрать вручную (правая кнопка)"))
         row(b2, "На сделку, % счёта:", ent(self.v_mshare, 5), cb(self.v_lev, list(LEV.values()), 22),
             ("hint", "позиция = % счёта × плечо; плечо не больше разрешённого биржей для монеты и снижается, если стоп дальше половины хода до ликвидации"))
         cbe = lambda var, vals, w: (lambda fr: ttk.Combobox(fr, textvariable=var, values=vals, width=w))   # можно выбрать или вписать
@@ -767,8 +765,8 @@ class App(tk.Tk):
         self.clock.configure(text=n.strftime("МСК %d.%m.%Y %H:%M:%S"))
         busy = "выполняется задача" if self.busy.is_set() else "ожидание"
         auto = ["робот работает"] if self.robot_running() else []
-        self.status.configure(text=f"Движение дня: рост {float(self.s.get('mid_thr', 2.5)):g}% → покупка на середине EMA10/EMA20, "
-                                   f"покупки {self.s.get('mid_from', '10:00')}–{self.s.get('mid_to', '18:00')}, выход {self.s.get('mid_exit', '23:45')} · {busy}"
+        self.status.configure(text=f"Движение дня: тренд + всплеск объёма → вход на первом откате к середине EMA10/EMA20, круглосуточно; "
+                                   f"после +{float(self.s.get('mid_act', 1.0) or 1.0):g}% б/у и трейлинг · {busy}"
                                    + (f" · авто: {', '.join(auto)}" if auto else ""))
         self.after(1000, self._tick)
 
@@ -840,6 +838,8 @@ class App(tk.Tk):
                       mid_carry={v: k for k, v in self.MCARRY.items()}.get(self.v_mcarry.get(), "none"),
                       mid_take_mode={v: k for k, v in self.MTAKE.items()}.get(self.v_mtake.get(), "all"),
                       mid_take_part=mtpart, mid_trail=mtrail,
+                      mid_stop={v: k for k, v in self.MSTOP.items()}.get(self.v_mstop.get(), "24h"),
+                      mid_act=self._num(self.v_mact.get(), 1.0) or 1.0, mid_vol_mult=max(1.0, self._num(self.v_mvm.get(), 3.0)),
                       mid_carry_days=int(self.v_mcdays.get()) if self.v_mcdays.get().strip().isdigit() else 0, **times)
         self.s.update(threshold=float(self.v_thr.get()), entry=self.v_entry.get(), capital=cap,
                       auto_signals=self.v_as.get(), auto_journal=self.v_aj.get(),
@@ -871,7 +871,7 @@ class App(tk.Tk):
         if hasattr(self, "robot_help"):
             self._robot_help()
         self.refresh_sandbox()
-        self.log(f"Настройки сохранены: {at.BROKER_NAMES.get(self._acc_key(), '')}, порог {float(self.s.get('mid_thr', 2.5)):g}%.\n")
+        self.log(f"Настройки сохранены: {at.BROKER_NAMES.get(self._acc_key(), '')}.\n")
         if self.remote_mode() and self.robot_running() and hasattr(self.robot, "push_settings"):
             rr, snap_s = self.robot, dict(self.s)
 
@@ -1471,12 +1471,11 @@ class App(tk.Tk):
         m = rc.mid_cfg(self.s)
         tfs = ", ".join({5: "5 мин", 15: "15 мин", 60: "1 час", 1440: "1 день"}[x] for x in m["tfs"])
         self.robot_help.configure(text=(
-            f"Стратегия «Движение дня» ({rc.mid_modes_text(m['modes'])}, {at.BROKER_NAMES.get(self._acc_key(), '')}): монета ушла от {at.hm(m['ref'])} МСК на {m['thr'] * 100:g}% → робот следит → цена опустилась до середины "
-            f"между EMA10 и EMA20 ({tfs}) → вход на {m['share'] * 100:g}% счёта" + ((" × плечо биржи по монете" if str(self.s.get('leverage')) == "auto" else f" × плечо {self.s.get('leverage')}") if str(self.s.get('leverage', '1')) != "1" else "")
-            + f"; стоп за лоем дня, тейк на хае дня (для шорта наоборот). "
-            + ("Входы круглосуточно" if m.get("allday") else f"Входы {at.hm(m['from'])}–{at.hm(m['to'])} МСК") + f", выход {at.hm(m['exit'])} МСК"
-            + {"none": "", "all": " (позиции переносятся до стопа или тейка)", "profit": " (позиции в плюсе переносятся)"}[m["carry"]]
-            
+            f"Стратегия «Движение дня» ({rc.mid_modes_text(m['modes'])}, {at.BROKER_NAMES.get(self._acc_key(), '')}): тренд ({tfs}: EMA10 выше EMA20, цена выше EMA200 и SMA200; "
+            f"для шорта наоборот) → всплеск объёма ×{m['vol_mult']:g} → первый откат к середине между EMA10 и EMA20 → вход на {m['share'] * 100:g}% счёта" + ((" × плечо биржи по монете" if str(self.s.get('leverage')) == "auto" else f" × плечо {self.s.get('leverage')}") if str(self.s.get('leverage', '1')) != "1" else "")
+            + f"; стоп {({'24h': 'за лоем за 24 ч', 'trend': 'за лоем с начала тренда', '1h': 'за лоем последнего часа'})[m['stop_mode']]} (для шорта — за хаем), "
+            + f"тейка нет: после +{m['act'] * 100:g}% стоп в безубыток, дальше трейлинг-стоп {m['trail'] * 100:g}% от лучшей цены. "
+            + "Входы круглосуточно, выхода по времени нет"
             + ". «Старт торговли» — робот покупает и продаёт сам; «Стоп торговли» — только наблюдение. Всё меняется во вкладке «Настройки»."))
 
     def show_robot(self, snap):
@@ -1489,7 +1488,7 @@ class App(tk.Tk):
         ls = snap.get("last_scan")
         thr = snap.get("threshold") or sc.THRESHOLD
         mk_txt = f"BTC от 03:00 МСК {mk * 100:+.2f}%" if mk is not None else ""
-        self.scan_lbl.configure(text=(f"Обновлено {sc.msk(ls):%H:%M} МСК: {mk_txt}; порог {rc.mid_cfg(self.s)['thr'] * 100:g}%"
+        self.scan_lbl.configure(text=(f"Обновлено {sc.msk(ls):%H:%M} МСК: {mk_txt}"
                                       if ls and mk is not None else "Данные появятся через минуту после запуска."))
         self.scan_tree.delete(*self.scan_tree.get_children())
         for tk, mv, why in snap["scan"][:60]:
@@ -1662,7 +1661,7 @@ class App(tk.Tk):
                    "direction", "leverage", "spike_half", "spike_trail", "spike_max", "spike_share", "two_takes", "tg_chat", "tg_form",
                    "tg_trades", "tg_imp", "tg_trend", "trend_on", "trend_trade", "tier_profile", "entry_window", "exit_late",
                    "carry_all", "day_carry", "day_exit", "day_mode", "day_tp", "day_tp_half", "day_trail", "day_act", "idx_form", "ema10_touch", "first_form", "trade_5m", "ema200", "ema200_tfs", "idx_day", "idx_flip", "idx_ref", "entry_from", "day_ref", "trade_weekends", "auto_journal",
-                   "mid_thr", "mid_from", "mid_to", "mid_exit", "mid_tf", "mid_tfs", "mid_idx", "mid_share", "mid_ref", "mid_multi", "mid_allday", "mid_swing_stop", "ex_stop", "mid_take_mode", "mid_take_part", "mid_trail", "mid_carry", "mid_carry_days", "mid_dir", "mid_modes", "mid_liq", "mid_min_turn", "mid_liq_on", "mid_minv_on", "mid_vol_on", "mid_vol"]
+                   "mid_thr", "mid_from", "mid_to", "mid_exit", "mid_tf", "mid_tfs", "mid_idx", "mid_share", "mid_ref", "mid_multi", "mid_allday", "mid_swing_stop", "ex_stop", "mid_take_mode", "mid_take_part", "mid_trail", "mid_carry", "mid_carry_days", "mid_dir", "mid_modes", "mid_liq", "mid_min_turn", "mid_liq_on", "mid_minv_on", "mid_vol_on", "mid_vol", "mid_stop", "mid_act", "mid_vol_mult"]
 
     def _settings_from_server(self, srv):
         """В режиме пульта вкладка «Настройки» показывает настройки робота на сервере (они и действуют)."""
@@ -1697,6 +1696,8 @@ class App(tk.Tk):
         self.v_mtpart.set(f"{float(s.get('mid_take_part', 50) or 50):g}"); self.v_mtrail.set(f"{float(s.get('mid_trail', 1.0) or 1.0):g}")
         self.v_mcarry.set(self.MCARRY.get(s.get("mid_carry", "none"), self.MCARRY["none"])); self.v_mcdays.set(str(int(s.get("mid_carry_days", 0) or 0)))
         self.v_midx.set(bool(s.get("mid_idx", False)))
+        self.v_mstop.set(self.MSTOP.get(s.get("mid_stop", "24h"), self.MSTOP["24h"]))
+        self.v_mact.set(f"{float(s.get('mid_act', 1.0) or 1.0):g}"); self.v_mvm.set(f"{float(s.get('mid_vol_mult', 3.0) or 3.0):g}")
         self.v_mfrom.set(str(s.get("mid_from", "04:00"))); self.v_mto.set(str(s.get("mid_to", "02:00"))); self.v_mexit.set(str(s.get("mid_exit", "02:50")))
         self.v_efrom.set(self.EFROM.get(str(s.get("entry_from") or ""), self.EFROM[""]))
         self.v_dref.set(self.DREF.get(s.get("day_ref", "main"), self.DREF["main"]))

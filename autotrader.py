@@ -963,6 +963,7 @@ class AutoTrader:
         return dict(self.MID_DEFAULT, **(self.sp.get("mid") or {}))
 
     def _trend_state(self, tk, now, tf):
+        vm = float(self._mid().get("vol_mult", MID_VOL_MULT) or MID_VOL_MULT)
         """Тренд на ТФ по закрытым свечам: (сторона, середина EMA10/EMA20, цена уже уходила за середину, первый откат уже был,
         начало тренда) или None, если тренда нет. Тренд вверх: EMA10 выше EMA20 и закрытие выше EMA200 и SMA200; вниз — зеркально.
         Откаты считаются по закрытым 5-мин свечам от начала тренда."""
@@ -1013,7 +1014,7 @@ class AutoTrader:
             md = mids[j]
             if armed and ((x["l"] <= md) if sd > 0 else (x["h"] >= md)):
                 return sd, mids[-1], True, True, T
-            if not spike and med > 0 and x.get("val", 0) >= MID_VOL_MULT * med and (x["c"] - x["o"]) * sd > 0:
+            if not spike and med > 0 and x.get("val", 0) >= vm * med and (x["c"] - x["o"]) * sd > 0:
                 spike = True                         # движение на объёме — с этого момента ловим откат
             if spike and (x["c"] - md) * sd > 0:
                 armed = True
@@ -1134,7 +1135,8 @@ class AutoTrader:
                 if armed and hit is None and (px - mid) * sd <= 0:
                     b5_ = self._bars5(tk, now)
                     d24 = [x for x in b5_ if x["t"] >= now.replace(tzinfo=None) - timedelta(hours=24)]
-                    seg = (d24 if MID_STOP_MODE == "24h" else [x for x in b5_ if x["t"] >= T0] if MID_STOP_MODE == "trend"
+                    smode = m.get("stop_mode", MID_STOP_MODE)
+                    seg = (d24 if smode == "24h" else [x for x in b5_ if x["t"] >= T0] if smode == "trend"
                            else b5_[-12:]) or b5_[-12:]
                     lo_s = (min([x["l"] for x in seg] or [lv[1]])) if sd > 0 else (max([x["h"] for x in seg] or [lv[2]]))
                     lo24 = lo_s if sd > 0 else min([x["l"] for x in d24] or [lv[1]])
@@ -1154,7 +1156,7 @@ class AutoTrader:
                 stop, take = min(lo * (1 - MID_STOP_BUF), px * (1 - MID_MIN_STOP)), hi
             else:
                 stop, take = max(hi * (1 + MID_STOP_BUF), px * (1 + MID_MIN_STOP)), lo
-            stop_n = {"24h": "за 24 ч", "trend": "с начала тренда", "1h": "за последний час"}[MID_STOP_MODE]
+            stop_n = {"24h": "за 24 ч", "trend": "с начала тренда", "1h": "за последний час"}.get(m.get("stop_mode", MID_STOP_MODE), "за 24 ч")
             stop_n = ("лой " if side > 0 else "хай ") + stop_n
             prev = self.st.setdefault("mid_last", {}).get(tk)
             if m.get("multi") and m.get("swing_stop") and prev:
@@ -1167,7 +1169,7 @@ class AutoTrader:
             what = "ПОКУПКА" if side > 0 else "ШОРТ"
             hi_n_ = ""
             risk = (px - stop) * side
-            if MID_TRAIL_MODE:                               # тейка нет — выход по безубытку и трейлинг-стопу
+            if m.get("trail_mode", MID_TRAIL_MODE):          # тейка нет — выход по безубытку и трейлинг-стопу
                 take, hi_n_ = px * (1 + side * 10), "нет — после +1% б/у и трейлинг"
             elif risk > 0 and (take - px) * side < MID_RR * risk:      # тейк ближе, чем 1,5 стопа
                 if MID_RR_MODE == "skip":
@@ -1219,7 +1221,7 @@ class AutoTrader:
             lo_n, hi_n = ("лой", "хай") if side > 0 else ("хай", "лой")
             self.log(f"«Движение дня»: {tk} дошла до середины EMA10/EMA20 на {self._tf_name(tf)} ({mid:.4g}), цена {px:.4g} — {what}"
                      + (f" №{n} за день" if n > 1 else "") + " (на " + f"{alloc:,.0f}".replace(",", " ") + " USDT" + (f", плечо ×{lev:g}" if lev != 1 else "") + ")" + f", стоп {stop:.4g} ({stop_n}), "
-                     + (f"тейк нет: после +{MID_TRAIL_ACT * 100:g}% стоп в б/у, дальше трейлинг-стоп" if MID_TRAIL_MODE else f"тейк {take:.4g} ({hi_n_ if hi_n_ else hi_n + ' за 24 ч'})") + ", без выхода по времени.")
+                     + (f"тейк нет: после +{m.get('act', MID_TRAIL_ACT) * 100:g}% стоп в б/у, дальше трейлинг-стоп {m.get('trail', 0.01) * 100:g}%" if m.get("trail_mode", MID_TRAIL_MODE) else f"тейк {take:.4g} ({hi_n_ if hi_n_ else hi_n + ' за 24 ч'})") + ", без выхода по времени.")
             self._open(tk, side, alloc, strat="mid", stop_level=stop, t1=take, exit_min=m["exit"], tf=tf)
 
     # ------------------------------------------------------------------ сканирование
@@ -1777,8 +1779,8 @@ class AutoTrader:
         pos.update(day_ex)
         if strat == "mid":
             mm = self._mid()
-            if MID_TRAIL_MODE:                        # без тейка: +1% → стоп в б/у, дальше трейлинг-стоп
-                pos.update(mtrail_only=True, mtrail=mm.get("trail", 0.01), mact=MID_TRAIL_ACT, take=None, best=entry)
+            if mm.get("trail_mode", MID_TRAIL_MODE):  # без тейка: +act → стоп в б/у, дальше трейлинг-стоп
+                pos.update(mtrail_only=True, mtrail=mm.get("trail", 0.01), mact=mm.get("act", MID_TRAIL_ACT), take=None, best=entry)
             elif mm.get("half"):                      # тейк на хае дня — часть, затем б/у и трейлинг-стоп
                 pos.update(mhalf=mm["half"], mtrail=mm.get("trail", 0.01))
         if day_ex.get("dtp"):                         # уровень тейка «движения дня» — для таблиц и графика
@@ -1797,7 +1799,7 @@ class AutoTrader:
         if strat == "mid":
             lo_n, hi_n = ("лой", "хай") if side > 0 else ("хай", "лой")
             self.log(f"  {tk}: {'КУПЛЕНО' if side > 0 else 'ПРОДАНО (шорт)'} {lots * per_lot:g} монет (" + f"{lots * per_lot * entry:,.2f}".replace(",", " ")
-                     + f" USDT) по ~{entry:.6g}, стоп {pos['stop']:.6g}, " + (f"тейк {pos['take']:.6g}" if pos.get("take") else f"тейка нет — после +{MID_TRAIL_ACT * 100:g}% б/у и трейлинг")
+                     + f" USDT) по ~{entry:.6g}, стоп {pos['stop']:.6g}, " + (f"тейк {pos['take']:.6g}" if pos.get("take") else f"тейка нет — после +{pos.get('mact', MID_TRAIL_ACT) * 100:g}% б/у и трейлинг {pos.get('mtrail', 0.01) * 100:g}%")
                      + ", без выхода по времени")
             self.on_event("open", dict(pos))
             self._push()

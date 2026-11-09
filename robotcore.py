@@ -24,7 +24,7 @@ DEFAULTS = {"threshold": 2.0, "entry": "15:00", "capital": 10_000,
             "bybit_demo_key": "", "bybit_demo_secret": "", "bybit_real_key": "", "bybit_real_secret": "",
             "binance_demo_key": "", "binance_demo_secret": "", "binance_real_key": "", "binance_real_secret": "",
             # «Движение дня»: время — по Москве (день начинается в 03:00 МСК = 00:00 UTC); суммы — в USDT
-            "mid_allday": True, "ex_stop": True, "mid_swing_stop": True, "mid_take_mode": "all", "mid_take_part": 50, "mid_trail": 1.0, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5}
+            "mid_allday": True, "ex_stop": True, "mid_swing_stop": True, "mid_take_mode": "all", "mid_take_part": 50, "mid_trail": 1.0, "mid_thr": 2.5, "mid_from": "04:00", "mid_to": "02:00", "mid_exit": "02:50", "mid_tf": 60, "mid_tfs": [60], "mid_idx": False, "mid_share": 10, "mid_ref": "0", "mid_multi": True, "mid_carry": "none", "mid_carry_days": 0, "mid_dir": "long", "mid_modes": ["long"], "mid_liq": 1.0, "mid_min_turn": 20, "mid_liq_on": True, "mid_minv_on": False, "mid_vol_on": False, "mid_vol": 5, "mid_stop": "24h", "mid_act": 1.0, "mid_vol_mult": 3.0}
 SECRET_KEYS = [k for k in DEFAULTS if k.endswith("_key") or k.endswith("_secret")]
 
 CHART_DEPTH = {1: 2, 5: 10, 15: 30, 60: 90, 1440: 400}       # сколько дней истории грузить на график
@@ -116,7 +116,7 @@ def mid_cfg(s):
             "from": 0 if s.get("mid_allday", True) else u(s.get("mid_from", "04:00"), 240),
             "to": 1440 if s.get("mid_allday", True) else (u(s.get("mid_to", "02:00"), 120) or 1440),
             "allday": bool(s.get("mid_allday", True)),
-            "swing_stop": bool(s.get("mid_swing_stop", True)),     # повторный вход — стоп за лоем предыдущего движения
+            "swing_stop": False,                          # стоп задаёт настройка «Стоп» (mid_stop)     # повторный вход — стоп за лоем предыдущего движения
             # тейк на хае дня: «all» — закрыть всё; «half» — закрыть часть, стоп в безубыток, остаток ведёт трейлинг-стоп
             "half": (min(0.95, max(0.05, float(s.get("mid_take_part", 50) or 50) / 100))
                      if s.get("mid_take_mode") == "half" else 0.0),
@@ -129,7 +129,12 @@ def mid_cfg(s):
             "modes": mid_modes(s),
             "liq": float(s.get("mid_liq", 1.0) or 0) / 100 if s.get("mid_liq_on", True) else 0.0,       # доля дневного оборота
             "min_turn": float(s.get("mid_min_turn", 0) or 0) * 1e6 if s.get("mid_minv_on", False) else 0.0,  # мин. оборот, USDT в день
-            "min_vol": float(s.get("mid_vol", 0) or 0) * 1e6 if s.get("mid_vol_on", False) else 0.0}      # мин. объём сегодня, USDT
+            "min_vol": float(s.get("mid_vol", 0) or 0) * 1e6 if s.get("mid_vol_on", False) else 0.0,      # мин. объём сегодня, USDT
+            # вход в тренде: всплеск объёма → первый откат к середине EMA10/EMA20; выход: стоп, после +act — б/у и трейлинг
+            "stop_mode": s.get("mid_stop") if s.get("mid_stop") in ("24h", "trend", "1h") else "24h",
+            "act": max(0.001, float(s.get("mid_act", 1.0) or 1.0) / 100),
+            "vol_mult": max(1.0, float(s.get("mid_vol_mult", 3.0) or 3.0)),
+            "trail_mode": True, "no_time_exit": True}
 
 
 MID_MODES = [("idx_long", "BTC растёт — лонг"), ("idx_short", "BTC падает — шорт"),
@@ -673,11 +678,12 @@ def _bt_cross(rows, tf):
     return out
 
 
-def _bt_first_touch(rows, tf):
+def _bt_first_touch(rows, tf, vmult=None):
     """5-мин свечи, на которых случился ПЕРВЫЙ откат к середине EMA10/EMA20 в тренде: {строка: (середина, сторона)}.
     После начала тренда нужно движение на объёме (5-мин свеча по ходу тренда с оборотом ≥ ×3 медианы за сутки до тренда),
     потом закрытие за серединой по ходу тренда, потом возврат к середине — это и есть вход."""
     out, armed, used, spike, med, st0 = {}, set(), set(), set(), {}, {}
+    vmult = vmult or at.MID_VOL_MULT
     vol = [r[5] if len(r) > 5 else 0 for r in rows]
     for i, v in enumerate(_bt_cross(rows, tf)):
         if v is None:
@@ -694,7 +700,7 @@ def _bt_first_touch(rows, tf):
             used.add(cid)
             out[i] = (md, s_, st0[cid])
             continue
-        if cid not in spike and med[cid] > 0 and vol[i] >= at.MID_VOL_MULT * med[cid] and (c - o) * s_ > 0:
+        if cid not in spike and med[cid] > 0 and vol[i] >= vmult * med[cid] and (c - o) * s_ > 0:
             spike.add(cid)
         if cid in spike and (c - md) * s_ > 0:
             armed.add(cid)
@@ -734,7 +740,7 @@ def bt_run(data, m, imoex=None):
     for tk, rows in data.items():
         if len(rows) < 100:
             continue
-        touch = {tf: _bt_first_touch(rows, tf) for tf in m["tfs"]}   # первые откаты каждого тренда
+        touch = {tf: _bt_first_touch(rows, tf, m.get("vol_mult")) for tf in m["tfs"]}   # первые откаты каждого тренда
         trend = {tf: _bt_trend(rows, tf) for tf in m["tfs"]}
         days, start = [], 0
         didx = [0] * len(rows)

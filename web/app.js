@@ -210,7 +210,7 @@ function renderState(st) {
   const pairTxt = pr && pr.enabled ? ` Пара серверов: торгует ${pr.active ? "этот" : "второй"} сервер (${pr.active ? "" : pr.peer_host + ", "}этот — ${pr.role === "primary" ? "основной" : "резервный"}); второй ${pr.peer_ok ? "на связи" : "не отвечает с " + pr.peer_last_ok}.` : "";
   const MS = SET || {};
   const tfs = (MS.mid_tfs || [MS.mid_tf || 60]).map((x) => ({ 5: "5м", 15: "15м", 60: "1ч", 1440: "1д" })[x] || x).join(", ");
-  $("#robotHint").textContent = (st.trade ? `«Движение дня» (${(MS.mid_modes || ["long"]).map((k) => ({ idx_long: "BTC вверх — лонг", idx_short: "BTC вниз — шорт", both: "обе стороны", long: "только лонг", short: "только шорт" })[k]).join(", ")}): монета выросла на ${MS.mid_thr || 2.5}% от 03:00 МСК → покупка на середине EMA10/EMA20 (${tfs}), стоп за лоем дня, тейк на хае дня; ${MS.mid_allday === false ? `покупки ${MS.mid_from || "04:00"}–${MS.mid_to || "02:00"}` : "покупки круглосуточно"}, выход ${MS.mid_exit || "02:50"} МСК. «Стоп» — выключить новые сделки.`
+  $("#robotHint").textContent = (st.trade ? `«Движение дня» (${(MS.mid_modes || ["long"]).map((k) => ({ idx_long: "BTC вверх — лонг", idx_short: "BTC вниз — шорт", both: "обе стороны", long: "только лонг", short: "только шорт" })[k]).join(", ")}): тренд (${tfs}: EMA10 выше EMA20, цена выше EMA200 и SMA200) + всплеск объёма → вход на первом откате к середине EMA10/EMA20, круглосуточно; стоп ${({ "24h": "за лоем 24 ч", trend: "за лоем с начала тренда", "1h": "за лоем последнего часа" })[MS.mid_stop || "24h"]}, после +${MS.mid_act || 1}% — безубыток и трейлинг ${MS.mid_trail || 1}%, выхода по времени нет. «Стоп» — выключить новые сделки.`
     : st.token_set ? "Робот следит за рынком, но не покупает. «Старт» — включить торговлю."
       : "Введите ключи API биржи во вкладке «Настройки» → «Биржа и счёт».") + pairTxt +
     (st.exchange ? " Счёт: " + st.exchange + (/_real$/.test(st.broker || "") ? " — РЕАЛЬНЫЕ деньги." : ".") : "");
@@ -257,7 +257,7 @@ function renderState(st) {
 
   // кандидаты «движения дня»
   const S = st.scan || [];
-  $("#scanInfo").textContent = st.last_scan ? `рост от 03:00 МСК, порог ${((SET && SET.mid_thr) || 2.5)}%` : "";
+  $("#scanInfo").textContent = st.last_scan ? "рост от 03:00 МСК — для справки" : "";
   $("#scan").innerHTML = S.length ? S.map(([tk, mv, why]) => {
     const on = /^(СЛЕЖУ|В ПОЗИЦИИ|порог есть)/.test(why);
     return `<div class="item tap" data-chart="${esc(tk)}" data-tf="60"><div class="hd"><span class="tk" style="font-size:14px">${esc(tk)}</span>
@@ -753,27 +753,19 @@ function renderSettings(s) {
     <div class="f"><span>Режим торговли (можно несколько)</span>
       ${(s.mid_modes_all || [["idx_long", "индекс идёт вверх — лонг"], ["idx_short", "индекс идёт вниз — шорт"], ["both", "в обе стороны при любом индексе"], ["long", "только лонг при любом индексе"], ["short", "только шорт при любом индексе"]]).map(([k, t]) =>
         `<label class="c"><input type="checkbox" name="mm_${k}" ${(s.mid_modes || ["long"]).includes(k) ? "checked" : ""}><span>${esc(t)}</span></label>`).join("")}</div>
-    <div class="hint" style="margin-left:0">Лонг: монета выросла от начала дня (03:00 МСК) на порог → ждём, пока цена опустится до середины между EMA10 и EMA20 → сразу покупка. Стоп — чуть ниже лоя дня, тейк — хай дня, иначе выход по времени. Шорт — зеркально: упала → шорт на середине, стоп за хаем дня, тейк на лое. С галочкой «несколько покупок» — после закрытия позиции снова, когда цена отойдёт выше середины и вернётся к ней.</div>
-    ${inp("mid_thr", "Монета выросла (упала) от 03:00 МСК на, %", "number", 'step="0.1" inputmode="decimal"')}
-    <div class="f"><span>EMA10 / EMA20 по графикам (можно несколько — покупка на том, где цена первой дошла до середины)</span>
+    <div class="hint" style="margin-left:0">Тренд вверх: EMA10 выше EMA20, цена выше EMA200 и SMA200 (тренд вниз — наоборот) → по ходу тренда всплеск объёма → робот ловит ПЕРВЫЙ откат к середине между EMA10 и EMA20 и входит. Повторные откаты того же тренда пропускаются. Входы круглосуточно, порога от начала дня нет. «По индексу» — биткоин от 03:00 МСК растёт → лонги, падает → шорты.</div>
+    <div class="f"><span>Тренд и EMA по графикам</span>
       ${[[5, "5 мин"], [15, "15 мин"], [60, "1 час"], [1440, "1 день"]].map(([k, n]) => `<label class="c"><input type="checkbox" name="mtf_${k}" ${(SET.mid_tfs || [SET.mid_tf || 60]).map(Number).includes(k) ? "checked" : ""}><span>${n}</span></label>`).join("")}</div>
     <div class="f"><span>Чем торговать</span>
       ${(s.markets_all || []).map(([k, t]) => `<label class="c"><input type="checkbox" name="dmk_${k}" ${(s.day_markets || ["top20"]).includes(k) ? "checked" : ""}><span>${esc(t)}</span></label>`).join("")}</div>
-    <div class="hint" style="margin-left:0">Время — по Москве. Торговый день: с 03:00 МСК до 03:00 МСК следующего дня.</div>
-    ${chk("mid_allday", "Покупки круглосуточно", "Иначе — только в окне ниже. Вошли после времени выхода — выход на следующий день.")}
-    ${inp("mid_from", "Покупки с (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="04:00"')}
-    ${inp("mid_to", "Покупки до (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="02:00"')}
-    ${inp("mid_exit", "Выход в (ЧЧ:ММ МСК)", "text", 'inputmode="numeric" placeholder="02:50"')}
-    ${chk("mid_multi", "Несколько покупок по монете за день", "После закрытия позиции — снова, когда цена отойдёт выше середины и вернётся к ней. На истории хуже одной покупки.")}
-    ${chk("mid_swing_stop", "2-й и следующие входы — стоп за лоем предыдущего движения", "Повторный вход по монете: стоп за минимумом цены (для шорта — максимумом) с прошлого входа, а не за лоем дня. Если он ближе 0,3% к цене — стоп за лоем дня.")}
+    ${inp("mid_vol_mult", "Всплеск объёма: 5-мин свеча по ходу тренда с оборотом ≥ × медианы за сутки", "number", 'step="0.5" inputmode="decimal"')}
+    ${sel("mid_stop", "Стоп (для шорта — за хаем)", [["24h", "за лоем за 24 часа"], ["trend", "за лоем с начала тренда"], ["1h", "за лоем последнего часа"]])}
+    <div class="hint" style="margin-left:0">Стоп не ближе 0,3% к цене входа.</div>
+    ${inp("mid_act", "Тейка нет. При прибыли, % → стоп в безубыток", "number", 'step="0.1" inputmode="decimal"')}
+    ${inp("mid_trail", "…дальше трейлинг-стоп, % от лучшей цены", "number", 'step="0.1" inputmode="decimal"')}
+    <div class="hint" style="margin-left:0">Пока рост идёт — позиция живёт. Выхода по времени нет: только стоп, безубыток или трейлинг-стоп.</div>
+    ${chk("mid_multi", "Несколько входов по монете за день", "Каждый новый тренд — свой первый откат.")}
     ${chk("ex_stop", "Страховочный стоп на бирже", "Стоп робота дублируется стопом на бирже и двигается вместе с ним (безубыток, трейлинг). Срабатывает, даже если сервер или связь пропали.")}
-    ${sel("mid_take_mode", "Тейк на хае дня (для шорта — на лое)", [["all", "закрыть всю позицию"], ["half", "закрыть часть → стоп в безубыток → трейлинг-стоп"]])}
-    ${inp("mid_take_part", "Какую часть закрыть на тейке, %", "number", 'step="5" inputmode="decimal"')}
-    ${inp("mid_trail", "Трейлинг-стоп остатка, % от лучшей цены", "number", 'step="0.1" inputmode="decimal"')}
-    <div class="hint" style="margin-left:0">После тейка части стоп сразу в цену входа, затем подтягивается за ценой. Остаток закрывается по трейлингу, стопу или по времени.</div>
-    ${sel("mid_carry", "Во время выхода", [["none", "закрыть все позиции"], ["all", "переносить все (до стопа или тейка)"], ["profit", "переносить только позиции в плюсе"]])}
-    ${inp("mid_carry_days", "Переносить не дольше, дней (0 — без ограничения)", "number", 'step="1" inputmode="numeric"')}
-    <div class="hint" style="margin-left:0">Стоп и тейк перенесённой позиции остаются. У каждой позиции выбор можно поменять вручную (кнопки у позиции).</div>
     ${inp("mid_share", "На сделку, % счёта", "number", 'step="1" inputmode="decimal"')}
     ${sel("leverage", "Плечо", Object.entries(LEV))}
     <div class="hint" style="margin-left:0">Размер позиции = % счёта × плечо. Плечо робот ставит на бирже перед входом (режим маржи — как выбран на бирже).</div>
@@ -825,17 +817,18 @@ $("#setForm").addEventListener("submit", async (e) => {
     exchange: v("exchange") || "bybit", mode: v("mode") || "demo",
     day_markets: (SET.markets_all || []).map(([k]) => k).filter((k) => c("dmk_" + k)),
     leverage: v("leverage"),
-    mid_thr: parseFloat(String(v("mid_thr")).replace(",", ".")) || 2.5, mid_tfs: [5, 15, 60, 1440].filter((k) => c("mtf_" + k)),
-    mid_from: (v("mid_from") || "04:00").trim(), mid_to: (v("mid_to") || "02:00").trim(), mid_exit: (v("mid_exit") || "02:50").trim(),
+    mid_tfs: [5, 15, 60, 1440].filter((k) => c("mtf_" + k)),
+    mid_stop: v("mid_stop") || "24h", mid_act: Math.max(0.1, parseFloat(String(v("mid_act")).replace(",", ".")) || 1),
+    mid_vol_mult: Math.max(1, parseFloat(String(v("mid_vol_mult")).replace(",", ".")) || 3),
     mid_share: parseFloat(String(v("mid_share")).replace(",", ".")) || 10,
-    mid_liq: parseFloat(v("mid_liq")) || 1, mid_min_turn: parseFloat(v("mid_min_turn")) || 20, mid_liq_on: c("mid_liq_on"), mid_allday: c("mid_allday"), mid_swing_stop: c("mid_swing_stop"), ex_stop: c("ex_stop"), mid_minv_on: c("mid_minv_on"), mid_vol_on: c("mid_vol_on"), mid_vol: parseFloat(v("mid_vol")) || 5, mid_multi: c("mid_multi"), mid_carry: v("mid_carry") || "none", mid_take_mode: v("mid_take_mode") || "all",
-    mid_take_part: Math.min(95, Math.max(5, parseFloat(v("mid_take_part")) || 50)), mid_trail: Math.min(50, Math.max(0.1, parseFloat(v("mid_trail")) || 1)), mid_modes: ["idx_long", "idx_short", "both", "long", "short"].filter((k) => c("mm_" + k)), mid_carry_days: parseInt(v("mid_carry_days")) || 0,
+    mid_liq: parseFloat(v("mid_liq")) || 1, mid_min_turn: parseFloat(v("mid_min_turn")) || 20, mid_liq_on: c("mid_liq_on"), ex_stop: c("ex_stop"), mid_minv_on: c("mid_minv_on"), mid_vol_on: c("mid_vol_on"), mid_vol: parseFloat(v("mid_vol")) || 5, mid_multi: c("mid_multi"),
+    mid_trail: Math.min(50, Math.max(0.1, parseFloat(v("mid_trail")) || 1)), mid_modes: ["idx_long", "idx_short", "both", "long", "short"].filter((k) => c("mm_" + k)),
     tg_chat: (v("tg_chat") || "").trim(), tg_form: c("tg_form"), tg_trend: c("tg_trend"), tg_trades: c("tg_trades"), tg_imp: c("tg_imp"),
   };
   if (!out.mid_tfs.length) out.mid_tfs = [60];
   if (!out.mid_modes.length) out.mid_modes = ["long"];
   const okT = (x) => /^([01]?\d|2[0-3])([:.][0-5]\d)?$/.test(x);
-  for (const k of ["mid_from", "mid_to", "mid_exit"]) if (!okT(out[k])) { toast(`Время «${out[k]}» — впишите как ЧЧ:ММ, например 04:00`, 5000); return; }
+
   if (!out.day_markets.length) out.day_markets = ["top20"];
   for (const ex of ["bybit", "binance"]) for (const md of ["demo", "real"]) for (const t of ["key", "secret"]) {
     const n = `${ex}_${md}_${t}`, x = (v(n) || "").trim(); if (x) out[n] = x;
